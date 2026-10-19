@@ -1,0 +1,6 @@
+# Every binary cargo runs (the app, tests, examples) is signed first with the
+# stable "Meow Dev" identity, so the Keychain recognises each build as the same
+# app instead of asking for access again. Set it up once with
+# scripts/setup-dev-signing.sh.
+[target.'cfg(target_os = "macos")']
+runner = "scripts/dev-run.sh"
