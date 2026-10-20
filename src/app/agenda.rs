@@ -37,6 +37,11 @@ impl AgendaState {
             run: None,
         }
     }
+
+    /// A refresh is in flight.
+    pub(super) fn busy(&self) -> bool {
+        self.run.is_some()
+    }
 }
 
 impl App {

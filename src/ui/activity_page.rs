@@ -224,6 +224,7 @@ fn kind_color(kind: Kind) -> Retained<NSColor> {
         Kind::Calendar => theme::live(),
         Kind::Tasks => theme::highlight(),
         Kind::Scheduled => theme::accent(),
+        Kind::Update => theme::cyan(),
     }
 }
 

@@ -28,6 +28,10 @@ impl RsvpState {
     pub(super) fn sending(&self) -> Vec<String> {
         self.pending.iter().map(|p| p.event_id.clone()).collect()
     }
+
+    pub(super) fn busy(&self) -> bool {
+        !self.pending.is_empty()
+    }
 }
 
 impl App {

@@ -142,14 +142,14 @@ impl Superset {
     }
 }
 
-struct Output {
-    success: bool,
-    stdout: String,
-    stderr: String,
+pub(crate) struct Output {
+    pub(crate) success: bool,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 /// Runs `command`, killing it if it outlives `timeout`.
-fn run_with_timeout(mut command: Command, timeout: Duration) -> Result<Output, String> {
+pub(crate) fn run_with_timeout(mut command: Command, timeout: Duration) -> Result<Output, String> {
     let mut child = command
         .spawn()
         .map_err(|e| format!("could not start: {e}"))?;

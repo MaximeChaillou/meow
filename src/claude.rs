@@ -167,7 +167,7 @@ impl ClaudeEnv {
     /// for the real one before looking for `claude`.
     pub fn discover() -> Result<Self, String> {
         let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
-        let path_var = login_shell_path().unwrap_or_else(fallback_path);
+        let path_var = shell_path();
         let binary = std::env::var_os("MEOW_CLAUDE_BIN")
             .map(PathBuf::from)
             .or_else(|| find_in_path("claude", &path_var))
@@ -189,6 +189,12 @@ impl ClaudeEnv {
             model,
         })
     }
+}
+
+/// The user's PATH: apps launched from Finder get a minimal one, so it comes
+/// from the login shell, or failing that from the usual install spots.
+pub fn shell_path() -> String {
+    login_shell_path().unwrap_or_else(fallback_path)
 }
 
 fn login_shell_path() -> Option<String> {

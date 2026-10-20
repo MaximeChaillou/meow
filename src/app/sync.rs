@@ -49,6 +49,11 @@ impl SyncState {
             status_shown_at: Instant::now(),
         }
     }
+
+    /// A check is in flight.
+    pub(super) fn busy(&self) -> bool {
+        self.run.is_some()
+    }
 }
 
 impl App {

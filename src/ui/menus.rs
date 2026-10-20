@@ -122,13 +122,30 @@ pub fn mark_coat(menu: &NSMenu, coat: Coat) {
     }
 }
 
-/// The cat's right-click menu, and its theme submenu to check the coat in later.
+/// A greyed-out line of text: having no action, the menu disables it.
+fn note_item(mtm: MainThreadMarker, title: &str) -> Retained<NSMenuItem> {
+    let entry = NSMenuItem::new(mtm);
+    entry.setTitle(&NSString::from_str(title));
+    entry
+}
+
+/// Shows how an update is going on the cat menu's update item. A disabled
+/// item gets no action, so the menu greys it out.
+pub fn show_update(entry: &NSMenuItem, title: &str, enabled: bool) {
+    entry.setTitle(&NSString::from_str(title));
+    // SAFETY: the item's target, the controller, understands the selector.
+    unsafe { entry.setAction(enabled.then_some(sel!(checkForUpdates:))) };
+}
+
+/// The cat's right-click menu, its theme submenu to check the coat in later,
+/// and its update item, under the `version` line.
 pub fn cat_menu(
     mtm: MainThreadMarker,
     controller: &Controller,
     actions: &[QuickAction],
     coat: Coat,
-) -> (Retained<NSMenu>, Retained<NSMenu>) {
+    version: &str,
+) -> (Retained<NSMenu>, Retained<NSMenu>, Retained<NSMenuItem>) {
     let target: &AnyObject = controller;
     let mut items: Vec<_> = actions
         .iter()
@@ -162,10 +179,19 @@ pub fn cat_menu(
     let coats = coat_menu(mtm, target, coat);
     let theme = submenu_item(mtm, &coats);
     theme.setTitle(&NSString::from_str("Theme"));
+    let update = item(
+        mtm,
+        "Check for Updates",
+        sel!(checkForUpdates:),
+        "",
+        Some(target),
+    );
     items.extend([
         theme,
         NSMenuItem::separatorItem(mtm),
+        note_item(mtm, version),
+        update.clone(),
         item(mtm, "Quit Meow", sel!(quit:), "", Some(target)),
     ]);
-    (menu(mtm, "Meow", &items), coats)
+    (menu(mtm, "Meow", &items), coats, update)
 }

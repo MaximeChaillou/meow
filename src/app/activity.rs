@@ -148,5 +148,6 @@ fn kind_name(kind: Kind) -> &'static str {
         Kind::Calendar => "Calendar",
         Kind::Tasks => "Tasks",
         Kind::Scheduled => "Scheduled",
+        Kind::Update => "Meow",
     }
 }

@@ -58,7 +58,7 @@ impl VoiceState {
         }
     }
 
-    fn busy(&self) -> bool {
+    pub(super) fn busy(&self) -> bool {
         !matches!(self.learning, Learning::Idle)
     }
 }

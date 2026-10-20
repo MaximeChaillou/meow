@@ -63,6 +63,26 @@ Run `scripts/setup-dev-signing.sh` once: it creates a self-signed "Meow Dev"
 identity, and every `cargo run` / `cargo test` binary (and `scripts/bundle.sh`)
 is then signed with it, so Keychain access granted once survives rebuilds.
 
+### Updates
+
+The app installed by `scripts/bundle.sh --install` keeps itself up to date with
+`main`. Every 6 hours (`MEOW_UPDATE_HOURS`, 0 turns it off), or when you pick
+**Check for Updates** in the cat's menu, it looks for new commits on `main` of
+the repository it was built from, with your usual git credentials. When there
+are, it builds them in the background, in a clone of its own
+(`~/Library/Caches/Meow/source`) with `scripts/bundle.sh`, so the new app is
+signed like yours and keeps its Keychain access, then puts it in place of the
+installed one. Activity says what changed; click the item to see the commits.
+Meow restarts into it once the chat has been closed for 10 minutes and nothing
+is running (a request, a check, an agent…); **Restart to Update** in the cat's
+menu does it right away. The menu also shows the version and commit running.
+
+A build from another branch, with commits not pushed or with uncommitted
+changes is never replaced, and neither is a `cargo run` binary. A failed build
+shows in Activity, with its log in
+`~/Library/Caches/Meow/source/target/update-build.log`, and is tried again at
+the next check.
+
 ### Tasks
 
 The chat window has a sidebar: **Chat**, **Tasks** (with the number of open
@@ -130,8 +150,8 @@ Linear, GitHub…). Sign in to them once with `/mcp` in Claude Code.
 The **Activity** page collects what happened while you were away: Slack DMs and
 mentions, calendar changes found by the agenda refresh (new, moved or cancelled
 events, new invitations, answers sent), tasks found or resolved by the
-background check, and scheduled tasks that ran or fired. Each new item also
-shows a macOS banner (the bundled app asks permission once; a `cargo run` build
+background check, scheduled tasks that ran or fired, and Meow's own updates.
+Each new item also shows a macOS banner (the bundled app asks permission once; a `cargo run` build
 posts through `osascript`). Opening the page marks everything read; `×`
 dismisses one item, **Clear all** empties the list, and items go after 7 days.
 Clicking an item opens what it is about.
@@ -225,6 +245,7 @@ name (`~/Library/Application Support/Lazy`, `~/.config/lazy`) to the new folders
 | `MEOW_SLACK_COOKIE` | *(none)*                    | Slack `d` cookie (`xoxd-…`), used with `MEOW_SLACK_TOKEN` |
 | `MEOW_SLACK_DOMAIN` | *(none)*                    | Slack workspace subdomain, used with `MEOW_SLACK_TOKEN` |
 | `MEOW_SUPERSET_BIN` | `superset` from your PATH, else `~/.superset/bin/superset` | Path to the Superset CLI, for coding agents |
+| `MEOW_UPDATE_HOURS` | `6`                         | Hours between update checks (`0` = off; the menu's Check for Updates still works) |
 
 ## Develop
 
@@ -257,6 +278,7 @@ sample messages) as a PNG there, then quits. Snapshots never connect to Slack.
 | `src/superset.rs`          | The `superset` CLI: projects, workspaces, agents          |
 | `src/agent.rs`             | Coding agents: `meow-agent` proposals, prompts, transcript parsing |
 | `src/agent_run.rs`         | One agent launch: worktree, open, start, follow its transcript |
+| `src/update.rs`            | Updates: a clone following `main`, rebuilt and swapped in for the installed app |
 | `src/slack/`               | Live Slack: sign-in credentials, Web API, background client, message model and `mrkdwn` formatting |
 | `src/app/`                 | 30 Hz tick tying the cat, chat, hotkey and runs together  |
 | `src/ui/`                  | AppKit: speech-bubble window, sidebar, chat/task/plan pages, theme, menus |

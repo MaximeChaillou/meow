@@ -1,6 +1,6 @@
 //! The activity log: what happened in the background (Slack messages for me,
-//! calendar changes, tasks found or resolved), newest first, for the Activity
-//! page. Items are kept a week, or until dismissed.
+//! calendar changes, tasks found or resolved, updates), newest first, for the
+//! Activity page. Items are kept a week, or until dismissed.
 
 use std::path::{Path, PathBuf};
 
@@ -19,6 +19,8 @@ pub enum Kind {
     Tasks,
     /// A scheduled task ran, or a watch fired.
     Scheduled,
+    /// Meow updated itself, or could not.
+    Update,
 }
 
 impl Kind {
@@ -29,6 +31,7 @@ impl Kind {
             Self::Calendar => "CALENDAR",
             Self::Tasks => "TASKS",
             Self::Scheduled => "SCHEDULED",
+            Self::Update => "UPDATE",
         }
     }
 }

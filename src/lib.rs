@@ -21,3 +21,4 @@ pub mod superset;
 pub mod sync;
 pub mod tasks;
 pub mod transcript;
+pub mod update;

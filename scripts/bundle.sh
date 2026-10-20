@@ -6,11 +6,22 @@ set -eu
 cd "$(dirname "$0")/.."
 cargo build --release
 
+VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+# What the app is built from, for its updates (src/update.rs): it follows
+# main from this checkout's origin, unless built with uncommitted changes.
+COMMIT=$(git rev-parse HEAD 2>/dev/null || true)
+REMOTE=$(git remote get-url origin 2>/dev/null | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' || true)
+if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    MODIFIED=true
+else
+    MODIFIED=false
+fi
+
 APP=target/release/Meow.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp target/release/meow "$APP/Contents/MacOS/meow"
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -19,9 +30,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key><string>dev.meow.cat</string>
     <key>CFBundleExecutable</key><string>meow</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>LSUIElement</key><true/>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>MeowCommit</key><string>$COMMIT</string>
+    <key>MeowRemote</key><string>$REMOTE</string>
+    <key>MeowModified</key><$MODIFIED/>
 </dict>
 </plist>
 PLIST

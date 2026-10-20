@@ -132,6 +132,13 @@ pub(super) struct AgentsState {
     sessions: Vec<AgentSession>,
 }
 
+impl AgentsState {
+    /// An agent is being started or followed.
+    pub(super) fn busy(&self) -> bool {
+        self.sessions.iter().any(|session| session.run.is_some())
+    }
+}
+
 impl App {
     /// Looks for `superset` and its projects in the background, once Claude's
     /// PATH is known; again later to pick up new projects.

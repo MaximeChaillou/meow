@@ -99,6 +99,8 @@ pub enum UiEvent {
     /// The bubble stopped being the focused window.
     FocusLost,
     NewConversation,
+    /// Check for an update now, or restart into one already installed.
+    CheckForUpdates,
     Quit,
 }
 

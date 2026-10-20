@@ -19,6 +19,7 @@ mod slack_voice;
 mod snapshot;
 mod sync;
 mod task_actions;
+mod update;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -123,6 +124,8 @@ struct App {
     routines: routines::RoutineState,
     /// Coding agents started in Superset from the chat or Slack.
     agents: agents::AgentsState,
+    /// Updates from `main`, and the restart into them.
+    update: update::UpdateState,
     /// A reply arrived out of sight; the cat shows `!` until it is seen.
     unread: bool,
     /// The conversation whose reply is waiting.
@@ -143,7 +146,9 @@ pub fn start(mtm: MainThreadMarker) {
     let (actions, actions_error) = load_actions();
     let (settings, settings_path, settings_error) = coat::load_settings();
     menus::install_main_menu(mtm, &controller);
-    let (cat_menu, coat_menu) = menus::cat_menu(mtm, &controller, &actions, settings.coat);
+    let (build, app_path) = update::running_build();
+    let (cat_menu, coat_menu, update_item) =
+        menus::cat_menu(mtm, &controller, &actions, settings.coat, &build.label());
     let cat_window = CatWindow::new(mtm, &cat_menu);
     let prop_window = CatWindow::prop(mtm);
     let chat = ChatWindow::new(mtm, &controller, &actions);
@@ -240,6 +245,7 @@ pub fn start(mtm: MainThreadMarker) {
         activity: activity_state,
         routines: routine_state,
         agents: agents::AgentsState::default(),
+        update: update::UpdateState::new(build, app_path, update_item),
         snapshot: snapshot::Snapshot::from_env(),
         _hotkeys: hotkeys,
     };
@@ -361,6 +367,7 @@ impl App {
         self.poll_rsvp();
         self.poll_routines();
         self.poll_agents();
+        self.poll_update();
         self.poll_snapshot();
         self.animate(dt);
     }
@@ -551,12 +558,15 @@ impl App {
             UiEvent::FocusLost if !self.chat.is_key() => self.chat.hide(),
             UiEvent::FocusLost => {}
             UiEvent::NewConversation => self.new_conversation(),
-            UiEvent::Quit => {
-                pointer::release();
-                self.slack.save_cache();
-                NSApplication::sharedApplication(self.mtm).terminate(None);
-            }
+            UiEvent::CheckForUpdates => self.update_from_menu(),
+            UiEvent::Quit => self.quit(),
         }
+    }
+
+    fn quit(&mut self) {
+        pointer::release();
+        self.slack.save_cache();
+        NSApplication::sharedApplication(self.mtm).terminate(None);
     }
 
     fn toggle_chat(&mut self) {

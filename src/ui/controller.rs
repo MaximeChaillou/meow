@@ -272,6 +272,11 @@ define_class!(
             push(UiEvent::RunAction);
         }
 
+        #[unsafe(method(checkForUpdates:))]
+        fn check_for_updates(&self, _sender: Option<&AnyObject>) {
+            push(UiEvent::CheckForUpdates);
+        }
+
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&AnyObject>) {
             push(UiEvent::Quit);
