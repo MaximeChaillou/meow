@@ -28,7 +28,8 @@ use your regular Claude subscription, not API billing.
   swings as you move it. Let go and it falls back down; drag fast to throw it
   (thrown hard at a screen edge it clings to it with its paws, then
   hops down, or now and then slides down the wall; thrown hard at the top it hangs there upside down, then drops; a
-  gentle throw just bounces off).
+  gentle throw just bounces off). With several displays, carry or throw it
+  across to another one: only the outer edges of your screens are walls.
 - **Pet the cat** by stroking it: move the mouse back and forth over it (no
   click). It closes its eyes and little hearts float up.
 

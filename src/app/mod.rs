@@ -42,7 +42,7 @@ use meow::transcript::Transcript;
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::{NSApplication, NSEvent, NSMenu, NSScreen};
-use objc2_foundation::{NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSTimer};
+use objc2_foundation::{NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSTimer};
 
 use crate::ui::cat_window::{self, CatWindow};
 use crate::ui::chat_window::ChatWindow;
@@ -50,6 +50,7 @@ use crate::ui::controller::Controller;
 use crate::ui::events::{self, UiEvent};
 use crate::ui::menus;
 use crate::ui::pointer;
+use crate::ui::screens;
 use crate::ui::sidebar::{Page, Selection};
 use crate::ui::theme;
 
@@ -67,6 +68,8 @@ struct App {
     mtm: MainThreadMarker,
     _controller: Retained<Controller>,
     cat_window: CatWindow,
+    /// The part of the cat over the next screen, while it crosses over.
+    cat_overflow: CatWindow,
     /// The cat's bowl, or the mouse it chases.
     prop_window: CatWindow,
     last_prop: Option<PropView>,
@@ -86,6 +89,9 @@ struct App {
     /// The theme submenu of the cat's menu, to check the current coat.
     coat_menu: Retained<NSMenu>,
     cat: Cat,
+    /// The screen height of the ground the cat's height is measured from:
+    /// the bottom of the screen it is on.
+    ground: f64,
     rng: Rng,
     last_look: Option<Look>,
     last_tick: Instant,
@@ -187,13 +193,18 @@ pub fn start(mtm: MainThreadMarker) {
         let _ = discovered.send(ClaudeEnv::discover());
     });
 
-    let start_x = screen_bounds(mtm)
-        .map(|(bounds, _)| (bounds.min_x + bounds.max_x) / 2.0)
-        .unwrap_or(0.0);
+    let (start_x, ground) = NSScreen::screens(mtm)
+        .firstObject()
+        .map(|screen| {
+            let (bounds, ground) = screen_bounds(&screen);
+            ((bounds.min_x + bounds.max_x) / 2.0, ground)
+        })
+        .unwrap_or((0.0, 0.0));
     let app = App {
         mtm,
         _controller: controller,
         cat_window,
+        cat_overflow: CatWindow::overflow(mtm),
         prop_window,
         last_prop: None,
         held_pointer: None,
@@ -207,6 +218,7 @@ pub fn start(mtm: MainThreadMarker) {
         settings_path,
         coat_menu,
         cat: Cat::new(start_x),
+        ground,
         rng: Rng::new(seed()),
         last_look: None,
         last_tick: Instant::now(),
@@ -308,15 +320,15 @@ fn seed() -> u64 {
         .unwrap_or(1)
 }
 
-/// Where the cat window may go on the main screen, and the ground's screen height.
-fn screen_bounds(mtm: MainThreadMarker) -> Option<(Bounds, f64)> {
-    let visible = NSScreen::screens(mtm).firstObject()?.visibleFrame();
+/// Where the cat window may go on `screen`, and the ground's screen height.
+fn screen_bounds(screen: &NSScreen) -> (Bounds, f64) {
+    let visible = screen.visibleFrame();
     let bounds = Bounds::new(
         visible.origin.x,
         visible.origin.x + visible.size.width - cat_window::WIDTH,
         visible.size.height - cat_window::HEIGHT,
     );
-    Some((bounds, visible.origin.y))
+    (bounds, visible.origin.y)
 }
 
 impl App {
@@ -361,22 +373,59 @@ impl App {
         }
     }
 
+    /// Where the cat may go on the screen it is on, that screen's ground and
+    /// its frame. Carried or thrown to another screen, the cat lives there from
+    /// then on: its height is measured again from the new ground.
+    fn cat_screen(&mut self) -> Option<(Bounds, f64, NSRect)> {
+        let center = NSPoint::new(
+            self.cat.x + cat_window::WIDTH / 2.0,
+            self.ground + self.cat.y + cat_window::HEIGHT / 2.0,
+        );
+        let screen = screens::showing(self.mtm, center)?;
+        let (bounds, ground) = screen_bounds(&screen);
+        self.cat.raise_ground(ground - self.ground);
+        self.ground = ground;
+        let open = screens::open_edges(self.mtm, &screen, center);
+        Some((Bounds { open, ..bounds }, ground, screen.frame()))
+    }
+
     fn animate(&mut self, dt: f64) {
-        let Some((bounds, ground)) = screen_bounds(self.mtm) else {
+        let Some((bounds, ground, frame)) = self.cat_screen() else {
             return;
         };
         let inputs = self.inputs();
         let pointer = NSEvent::mouseLocation();
         self.cat.see_pointer(pointer.x, pointer.y - ground);
         self.cat.update(dt, bounds, inputs, &mut self.rng);
-        self.cat_window.move_to(self.cat.x, ground + self.cat.y);
+        self.show_cat(frame, NSPoint::new(self.cat.x, ground + self.cat.y));
         self.show_prop(ground);
         self.hold_pointer(ground);
 
         let look = self.cat.look(inputs);
         if self.last_look != Some(look) {
-            self.cat_window.view.show(render(&look, self.settings.coat));
+            let sprite = render(&look, self.settings.coat);
+            self.cat_overflow.view.show(sprite.clone());
+            self.cat_window.view.show(sprite);
             self.last_look = Some(look);
+        }
+    }
+
+    /// Shows the cat at `origin` on its screen (with `frame`) and, while it
+    /// crosses over to the next screen, the part of it over there in a second
+    /// window: each stays whole on its own screen.
+    fn show_cat(&mut self, frame: NSRect, origin: NSPoint) {
+        self.cat_window.show_on(frame, origin);
+        let rect = NSRect::new(origin, NSSize::new(cat_window::WIDTH, cat_window::HEIGHT));
+        let overflow = &self.cat_overflow.panel;
+        match screens::next_under(self.mtm, rect, frame) {
+            Some(next) => {
+                self.cat_overflow.show_on(next.frame(), origin);
+                if !overflow.isVisible() {
+                    overflow.orderFrontRegardless();
+                }
+            }
+            None if overflow.isVisible() => overflow.orderOut(None),
+            None => {}
         }
     }
 
@@ -420,7 +469,7 @@ impl App {
 
     /// Feeds the cat, or lets a mouse in, from its menu.
     fn play(&mut self, event: UiEvent) {
-        let Some((bounds, _)) = screen_bounds(self.mtm) else {
+        let Some((bounds, ..)) = self.cat_screen() else {
             return;
         };
         match event {
@@ -433,10 +482,7 @@ impl App {
         match event {
             UiEvent::CatClicked | UiEvent::ToggleChat => self.toggle_chat(),
             UiEvent::Grab => self.cat.grab(),
-            UiEvent::DragTo { x, y } => {
-                let ground = screen_bounds(self.mtm).map_or(0.0, |(_, ground)| ground);
-                self.cat.drag_to(x, y - ground);
-            }
+            UiEvent::DragTo { x, y } => self.cat.drag_to(x, y - self.ground),
             UiEvent::Drop => self.cat.release(),
             UiEvent::Stroke(distance) => self.cat.stroke(distance),
             UiEvent::SetCoat(index) => self.set_coat(index),

@@ -12,7 +12,7 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadMarker, sel};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSAutoresizingMaskOptions,
-    NSBitmapImageFileType, NSButton, NSColor, NSLineBreakMode, NSScreen, NSStatusWindowLevel,
+    NSBitmapImageFileType, NSButton, NSColor, NSLineBreakMode, NSStatusWindowLevel,
     NSTextAlignment, NSTextField, NSView, NSWindowCollectionBehavior,
 };
 use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
@@ -24,6 +24,7 @@ use super::controller::Controller;
 use super::plan_page::PlanPage;
 use super::rich_text::{self, Attributes};
 use super::routines_page::RoutinesPage;
+use super::screens;
 use super::sidebar::{self, Page, Selection, Sidebar};
 use super::slack_page::SlackPage;
 use super::task_page::TaskPage;
@@ -351,7 +352,8 @@ impl ChatWindow {
         let cat_center = anchor.origin.x + anchor.size.width / 2.0;
         let mut x = cat_center - size.width / 2.0;
         let mut y = anchor.origin.y + anchor.size.height;
-        if let Some(screen) = NSScreen::screens(mtm).firstObject() {
+        let anchor_center = NSPoint::new(cat_center, anchor.origin.y + anchor.size.height / 2.0);
+        if let Some(screen) = screens::showing(mtm, anchor_center) {
             let visible = screen.visibleFrame();
             x = x.clamp(
                 visible.origin.x,

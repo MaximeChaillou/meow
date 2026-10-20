@@ -93,6 +93,25 @@ pub struct Bounds {
     pub min_x: f64,
     pub max_x: f64,
     pub max_y: f64,
+    pub open: OpenEdges,
+}
+
+/// The edges of the screen that lead on to another screen, at the cat's
+/// height: a thrown or carried cat goes through them instead of hitting a wall.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OpenEdges {
+    pub left: bool,
+    pub right: bool,
+    pub top: bool,
+}
+
+impl OpenEdges {
+    /// A screen on its own: walls all around.
+    pub const NONE: Self = Self {
+        left: false,
+        right: false,
+        top: false,
+    };
 }
 
 impl Bounds {
@@ -101,7 +120,24 @@ impl Bounds {
             min_x,
             max_x: max_x.max(min_x),
             max_y: max_y.max(0.0),
+            open: OpenEdges::NONE,
         }
+    }
+
+    /// `x` kept off the side edges that are walls.
+    fn between_walls(&self, x: f64) -> f64 {
+        let x = if self.open.left { x } else { x.max(self.min_x) };
+        if self.open.right {
+            x
+        } else {
+            x.min(self.max_x)
+        }
+    }
+
+    /// `y` kept off the ground, and under the top edge if it is a wall.
+    fn under_ceiling(&self, y: f64) -> f64 {
+        let y = y.max(0.0);
+        if self.open.top { y } else { y.min(self.max_y) }
     }
 }
 
@@ -254,6 +290,13 @@ impl Cat {
         }
     }
 
+    /// Measures heights from a ground `rise` points higher from now on (the
+    /// cat is on another screen); the cat itself stays where it is.
+    pub fn raise_ground(&mut self, rise: f64) {
+        self.y -= rise;
+        self.drag_seen.1 -= rise;
+    }
+
     /// Lets go: the cat keeps the drag's momentum and falls.
     pub fn release(&mut self) {
         if !self.is_held() {
@@ -349,8 +392,8 @@ impl Cat {
     }
 
     fn follow_drag(&mut self, dt: f64, bounds: Bounds) {
-        self.x = self.x.clamp(bounds.min_x, bounds.max_x);
-        self.y = self.y.clamp(0.0, bounds.max_y);
+        self.x = bounds.between_walls(self.x);
+        self.y = bounds.under_ceiling(self.y);
         if dt > 0.0 {
             let (seen_x, seen_y) = self.drag_seen;
             let lerp = |v: f64, target: f64| v + (target - v) * DRAG_SMOOTHING;
@@ -394,21 +437,24 @@ impl Cat {
         self.x += self.vx * dt;
         self.y += self.vy * dt;
 
-        if self.x <= bounds.min_x || self.x >= bounds.max_x {
+        let at_wall = (self.x <= bounds.min_x && !bounds.open.left)
+            || (self.x >= bounds.max_x && !bounds.open.right);
+        if at_wall {
             self.x = self.x.clamp(bounds.min_x, bounds.max_x);
             if self.vx.abs() >= CLING_MIN_SPEED && self.y >= CLING_MIN_HEIGHT {
                 return self.grab_wall(rng);
             }
             self.vx = -self.vx * WALL_BOUNCE;
         }
-        if self.y >= bounds.max_y {
+        if self.y >= bounds.max_y && !bounds.open.top {
             self.y = bounds.max_y;
             if self.vy >= CLING_MIN_SPEED {
                 return self.grab_ceiling(rng);
             }
             self.vy = self.vy.min(0.0);
         }
-        if self.y <= 0.0 {
+        // Thrown up from the screen below, it rises past the ground before it can land.
+        if self.y <= 0.0 && self.vy <= 0.0 {
             // Cats land on their feet, then take a moment.
             self.y = 0.0;
             self.vx = 0.0;

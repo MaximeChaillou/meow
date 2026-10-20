@@ -16,6 +16,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use super::events::{UiEvent, push};
+use super::screens;
 
 pub const SCALE: f64 = meow::sprites::SCALE;
 pub const WIDTH: f64 = CANVAS_W as f64 * SCALE;
@@ -37,6 +38,9 @@ pub struct CatViewIvars {
     press: Cell<Option<Press>>,
     /// Last mouse position over the cat, to measure strokes.
     hover: Cell<Option<NSPoint>>,
+    /// How far (points, screen directions) the sprite is drawn from the
+    /// window's corner: off it when only part of the cat is on this screen.
+    shift: Cell<(f64, f64)>,
 }
 
 define_class!(
@@ -156,9 +160,17 @@ impl CatView {
         self.setNeedsDisplay(true);
     }
 
+    fn set_shift(&self, shift: (f64, f64)) {
+        if self.ivars().shift.replace(shift) != shift {
+            self.setNeedsDisplay(true);
+        }
+    }
+
     fn draw_pixels(&self) {
         let frame = self.ivars().frame.borrow();
         let Some(frame) = frame.as_ref() else { return };
+        // The view is flipped: up on screen is down here.
+        let (dx, dy) = self.ivars().shift.get();
         for y in 0..frame.height {
             for x in 0..frame.width {
                 let Some([r, g, b]) = frame.get(x, y) else {
@@ -167,7 +179,7 @@ impl CatView {
                 let channel = |v: u8| f64::from(v) / 255.0;
                 NSColor::colorWithSRGBRed_green_blue_alpha(channel(r), channel(g), channel(b), 1.0)
                     .setFill();
-                let origin = NSPoint::new(x as f64 * SCALE, y as f64 * SCALE);
+                let origin = NSPoint::new(x as f64 * SCALE + dx, y as f64 * SCALE - dy);
                 NSBezierPath::fillRect(NSRect::new(origin, NSSize::new(SCALE, SCALE)));
             }
         }
@@ -193,6 +205,14 @@ impl CatWindow {
     pub fn prop(mtm: MainThreadMarker) -> Self {
         let size = NSSize::new(PROP_W as f64 * SCALE, PROP_H as f64 * SCALE);
         let window = Self::panel(mtm, size);
+        window.panel.setIgnoresMouseEvents(true);
+        window
+    }
+
+    /// A window for the part of the cat over the next screen while it crosses
+    /// over: it lets clicks through and starts hidden.
+    pub fn overflow(mtm: MainThreadMarker) -> Self {
+        let window = Self::panel(mtm, NSSize::new(WIDTH, HEIGHT));
         window.panel.setIgnoresMouseEvents(true);
         window
     }
@@ -231,6 +251,18 @@ impl CatWindow {
     pub fn move_to(&self, x: f64, y: f64) {
         self.panel
             .setFrameOrigin(NSPoint::new(x.round(), y.round()));
+    }
+
+    /// Shows the sprite at `origin` (screen coordinates), or the part of it on
+    /// the screen with `frame`: the window stays whole on that screen, with the
+    /// sprite drawn off its corner. A window across two displays shows on only
+    /// one of them, and flickers as it changes over.
+    pub fn show_on(&self, frame: NSRect, origin: NSPoint) {
+        let origin = NSPoint::new(origin.x.round(), origin.y.round());
+        let at = screens::keep_whole_on(frame, origin, self.panel.frame().size);
+        let at = NSPoint::new(at.x.round(), at.y.round());
+        self.panel.setFrameOrigin(at);
+        self.view.set_shift((origin.x - at.x, origin.y - at.y));
     }
 
     pub fn frame(&self) -> NSRect {
