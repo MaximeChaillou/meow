@@ -30,7 +30,8 @@ fn main() {
         (Pose::Walk(2), Bubble::None, Facing::Right),
         (Pose::Stand, Bubble::Dots(3), Facing::Right),
         (Pose::Blink, Bubble::Bang, Facing::Right),
-        (Pose::Sleep, Bubble::Zzz, Facing::Right),
+        (Pose::Sleep, Bubble::Zzz(0), Facing::Right),
+        (Pose::Sleep, Bubble::Zzz(3), Facing::Right),
         (
             Pose::Dangle {
                 swing: 0,

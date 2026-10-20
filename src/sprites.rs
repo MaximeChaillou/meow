@@ -28,6 +28,14 @@ const HEART_LANES: [isize; 3] = [7, 12, 17];
 const HEART_STAGGER: usize = 4;
 /// Frames for a heart to rise from below the space to above it.
 const HEART_CYCLE: usize = BUBBLE_H + 4;
+/// The sleeping cat lies lower than the standing one; this is its top row.
+const SLEEP_TOP: usize = BUBBLE_H + 3;
+const Z: [&str; 5] = ["kkk", "..k", ".k.", "k..", "kkk"];
+/// Left column of a z as it appears, between the sleeping cat's ears.
+const Z_X: isize = 17;
+/// Frames for a z to float from just above the sleeping cat's head out
+/// through the top, plus one gone so the two z's never touch.
+const Z_CYCLE: usize = SLEEP_TOP + 1;
 const LEG_XS: [usize; 4] = [3, 6, 14, 17];
 const LEG_ROW: usize = 10;
 const FALL_STRIDES: [isize; 4] = [-1, -1, 1, 1];
@@ -74,7 +82,8 @@ pub enum Bubble {
     None,
     Dots(u8),
     Bang,
-    Zzz,
+    /// Small z's floating up from the sleeping cat; the frame drives the animation.
+    Zzz(u8),
     /// Small hearts rising above the cat; the frame drives the animation.
     Hearts(u8),
 }
@@ -162,7 +171,6 @@ const BUBBLE_FRAME: [&str; 7] = [
 ];
 
 const BANG: [&str; 4] = ["kwwwkwwwk", "kwwwkwwwk", "kwwwwwwwk", "kwwwkwwwk"];
-const ZZZ: [&str; 4] = ["kwwkkkwwk", "kwwwwkwwk", "kwwwkwwwk", "kwwkkkwwk"];
 
 /// A mutable char grid used while composing a frame.
 struct Grid {
@@ -187,6 +195,22 @@ impl Grid {
             for (dx, c) in row.chars().enumerate() {
                 if c != '.' {
                     self.set((x0 + dx) as isize, y0 + dy, c);
+                }
+            }
+        }
+    }
+
+    /// Like `blit`, at a position that may be off the canvas, keeping only
+    /// the rows above `floor`.
+    fn blit_above(&mut self, rows: &[&str], x0: isize, y0: isize, floor: usize) {
+        for (dy, row) in rows.iter().enumerate() {
+            let y = y0 + dy as isize;
+            if !(0..floor as isize).contains(&y) {
+                continue;
+            }
+            for (dx, c) in row.chars().enumerate() {
+                if c != '.' {
+                    self.set(x0 + dx as isize, y as usize, c);
                 }
             }
         }
@@ -279,7 +303,7 @@ fn draw_upside_down(grid: &mut Grid, strides: [isize; 4]) {
 }
 
 fn draw_sleeping(grid: &mut Grid) {
-    let top = BUBBLE_H + 3;
+    let top = SLEEP_TOP;
     grid.blit(&cat_rows(true), 0, top);
     // Tuck the tail away: clear it and close the back outline.
     for y in top + 1..top + 6 {
@@ -298,17 +322,18 @@ fn draw_hearts(grid: &mut Grid, frame: u8) {
         let progress = (usize::from(frame) + lane * HEART_STAGGER) % HEART_CYCLE;
         let top = BUBBLE_H as isize - progress as isize;
         let wobble = (progress / 4 % 2) as isize;
-        for (dy, row) in HEART.iter().enumerate() {
-            let y = top + dy as isize;
-            if !(0..BUBBLE_H as isize).contains(&y) {
-                continue;
-            }
-            for (dx, c) in row.chars().enumerate() {
-                if c != '.' {
-                    grid.set(x + wobble + dx as isize, y as usize, c);
-                }
-            }
-        }
+        grid.blit_above(&HEART, x + wobble, top, BUBBLE_H);
+    }
+}
+
+/// Two z's take turns floating up from between the sleeping cat's ears,
+/// drifting back over its body and leaving through the top.
+fn draw_zs(grid: &mut Grid, frame: u8) {
+    for offset in [0, Z_CYCLE / 2] {
+        let progress = (usize::from(frame) + offset) % Z_CYCLE;
+        let top = (SLEEP_TOP - Z.len()) as isize - progress as isize;
+        let drift = (progress / 2) as isize;
+        grid.blit_above(&Z, Z_X - drift, top, SLEEP_TOP);
     }
 }
 
@@ -316,12 +341,12 @@ fn draw_bubble(grid: &mut Grid, bubble: Bubble) {
     let content: Vec<String> = match bubble {
         Bubble::None => return,
         Bubble::Hearts(frame) => return draw_hearts(grid, frame),
+        Bubble::Zzz(frame) => return draw_zs(grid, frame),
         Bubble::Dots(n) => {
             let dots: String = (0..3).map(|i| if i < n { "wk" } else { "ww" }).collect();
             vec![format!("k{dots}wk")]
         }
         Bubble::Bang => BANG.iter().map(|s| s.to_string()).collect(),
-        Bubble::Zzz => ZZZ.iter().map(|s| s.to_string()).collect(),
     };
     grid.blit(&BUBBLE_FRAME, BUBBLE_X, 0);
     let first_row = if content.len() == 1 { 3 } else { 1 };
@@ -391,7 +416,7 @@ mod tests {
             .chain(&BODY)
             .chain(&BUBBLE_FRAME)
             .chain(&BANG)
-            .chain(&ZZZ);
+            .chain(&Z);
         for row in all {
             assert!(row.len() <= CANVAS_W, "row too wide: {row}");
             for coat in Coat::ALL {
@@ -551,6 +576,23 @@ mod tests {
         assert_ne!(now, hearts_at(6), "hearts move between frames");
     }
 
+    #[test]
+    fn zs_float_up_above_the_sleeping_cat() {
+        let asleep = |bubble| render(&look(Pose::Sleep, bubble, Facing::Right));
+        let cat = asleep(Bubble::None).pixels;
+        let lowest_z_row = |frame: u8| {
+            let f = asleep(Bubble::Zzz(frame));
+            let below = SLEEP_TOP * CANVAS_W;
+            assert_eq!(f.pixels[below..], cat[below..], "the cat is untouched");
+            (0..SLEEP_TOP)
+                .rev()
+                .find(|&y| (0..CANVAS_W).any(|x| f.get(x, y).is_some()))
+                .unwrap()
+        };
+        assert_eq!(lowest_z_row(0), SLEEP_TOP - 1, "just above the head");
+        assert_eq!(lowest_z_row(1), SLEEP_TOP - 2, "z's rise a row per frame");
+    }
+
     /// The two eye pixels on the lower eye row, where closed eyes are drawn.
     fn eye_colors(coat: Coat, pose: Pose) -> [Rgb; 2] {
         let frame = super::render(&look(pose, Bubble::None, Facing::Right), coat);
@@ -593,7 +635,8 @@ mod tests {
     fn bubble_and_hearts_keep_their_colors() {
         let bang = look(Pose::Stand, Bubble::Bang, Facing::Right);
         let hearts = look(Pose::Blink, Bubble::Hearts(5), Facing::Right);
-        for shown in [bang, hearts] {
+        let zs = look(Pose::Sleep, Bubble::Zzz(5), Facing::Right);
+        for shown in [bang, hearts, zs] {
             let ginger = super::render(&shown, Coat::Ginger);
             for coat in Coat::ALL {
                 let other = super::render(&shown, coat);

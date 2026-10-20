@@ -55,6 +55,7 @@ const AFFECTION_DECAY: f64 = 200.0;
 /// The cat stays happy this long after the last stroke.
 pub const PET_LINGER: f64 = 1.5;
 const HEARTS_FPS: f64 = 8.0;
+const ZZZ_FPS: f64 = 3.0;
 /// Chances, when an idle cat picks what to do next, of a snack or a mouse.
 pub const SNACK_CHANCE: f64 = 0.06;
 pub const MOUSE_CHANCE: f64 = 0.06;
@@ -641,7 +642,7 @@ impl Cat {
         } else if inputs.unread || self.is_startled() {
             Bubble::Bang
         } else if self.activity == Activity::Sleeping {
-            Bubble::Zzz
+            Bubble::Zzz((self.clock * ZZZ_FPS) as u64 as u8)
         } else {
             Bubble::None
         };
