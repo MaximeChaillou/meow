@@ -19,6 +19,7 @@ mod slack_voice;
 mod snapshot;
 mod sync;
 mod task_actions;
+mod update;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -129,6 +130,8 @@ struct App {
     routines: routines::RoutineState,
     /// Coding agents started in Superset from the chat or Slack.
     agents: agents::AgentsState,
+    /// Updates from the GitHub releases, for release builds.
+    update: update::UpdateState,
     /// A reply arrived out of sight; the cat shows `!` until it is seen.
     unread: bool,
     /// The conversation whose reply is waiting.
@@ -149,7 +152,13 @@ pub fn start(mtm: MainThreadMarker) {
     let (actions, actions_error) = load_actions();
     let (settings, settings_path, settings_error) = coat::load_settings();
     menus::install_main_menu(mtm, &controller);
-    let (cat_menu, coat_menu) = menus::cat_menu(mtm, &controller, &actions, settings.coat);
+    let (cat_menu, coat_menu) = menus::cat_menu(
+        mtm,
+        &controller,
+        &actions,
+        settings.coat,
+        &update::version_label(),
+    );
     let cat_window = CatWindow::new(mtm, &cat_menu);
     let prop_window = CatWindow::prop(mtm);
     let chat = ChatWindow::new(mtm, &controller, &actions);
@@ -248,6 +257,7 @@ pub fn start(mtm: MainThreadMarker) {
         activity: activity_state,
         routines: routine_state,
         agents: agents::AgentsState::default(),
+        update: update::UpdateState::from_env(),
         snapshot: snapshot::Snapshot::from_env(),
         _hotkeys: hotkeys,
     };
@@ -370,6 +380,7 @@ impl App {
         self.poll_routines();
         self.poll_agents();
         self.poll_snapshot();
+        self.poll_update();
         self.animate(dt);
     }
 

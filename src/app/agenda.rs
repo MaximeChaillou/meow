@@ -25,6 +25,11 @@ pub(super) struct AgendaState {
 }
 
 impl AgendaState {
+    /// A refresh is running.
+    pub(super) fn is_running(&self) -> bool {
+        self.run.is_some()
+    }
+
     /// Reads `MEOW_AGENDA_MINUTES` (default 15, 0 turns refreshes off).
     pub(super) fn from_env() -> Self {
         let minutes = std::env::var("MEOW_AGENDA_MINUTES")

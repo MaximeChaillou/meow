@@ -24,6 +24,11 @@ pub(super) struct RsvpState {
 }
 
 impl RsvpState {
+    /// An answer is being sent.
+    pub(super) fn is_running(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     /// Ids of the events whose answer is being sent.
     pub(super) fn sending(&self) -> Vec<String> {
         self.pending.iter().map(|p| p.event_id.clone()).collect()

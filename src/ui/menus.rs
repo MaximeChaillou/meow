@@ -35,6 +35,21 @@ fn item(
     item
 }
 
+/// A greyed-out line of information.
+fn label(mtm: MainThreadMarker, title: &str) -> Retained<NSMenuItem> {
+    // SAFETY: plain initializer; with no action the item shows disabled.
+    let item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str(title),
+            None,
+            &NSString::from_str(""),
+        )
+    };
+    item.setEnabled(false);
+    item
+}
+
 fn menu(mtm: MainThreadMarker, title: &str, items: &[Retained<NSMenuItem>]) -> Retained<NSMenu> {
     let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
     for entry in items {
@@ -128,6 +143,7 @@ pub fn cat_menu(
     controller: &Controller,
     actions: &[QuickAction],
     coat: Coat,
+    version: &str,
 ) -> (Retained<NSMenu>, Retained<NSMenu>) {
     let target: &AnyObject = controller;
     let mut items: Vec<_> = actions
@@ -165,6 +181,7 @@ pub fn cat_menu(
     items.extend([
         theme,
         NSMenuItem::separatorItem(mtm),
+        label(mtm, version),
         item(mtm, "Quit Meow", sel!(quit:), "", Some(target)),
     ]);
     (menu(mtm, "Meow", &items), coats)

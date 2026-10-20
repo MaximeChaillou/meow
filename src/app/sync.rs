@@ -34,6 +34,11 @@ pub(super) struct SyncState {
 }
 
 impl SyncState {
+    /// A check is running.
+    pub(super) fn is_running(&self) -> bool {
+        self.run.is_some()
+    }
+
     /// Reads `MEOW_SYNC_MINUTES` (default 5, 0 turns checks off).
     pub(super) fn from_env() -> Self {
         let minutes = std::env::var("MEOW_SYNC_MINUTES")
