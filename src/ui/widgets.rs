@@ -587,3 +587,29 @@ fn checkbox_image(on: bool) -> Retained<NSImage> {
     image.unlockFocus();
     image
 }
+
+/// `frame` drawn with each pixel `scale` points square; transparent pixels stay clear.
+pub fn pixel_image(frame: &meow::sprites::Frame, scale: f64) -> Retained<NSImage> {
+    let image = NSImage::initWithSize(
+        NSImage::alloc(),
+        NSSize::new(frame.width as f64 * scale, frame.height as f64 * scale),
+    );
+    #[allow(deprecated)]
+    image.lockFocus();
+    for y in 0..frame.height {
+        for x in 0..frame.width {
+            let Some([r, g, b]) = frame.get(x, y) else {
+                continue;
+            };
+            let channel = |v: u8| f64::from(v) / 255.0;
+            NSColor::colorWithSRGBRed_green_blue_alpha(channel(r), channel(g), channel(b), 1.0)
+                .setFill();
+            // Image space grows upward; frame rows go down.
+            let origin = NSPoint::new(x as f64 * scale, (frame.height - 1 - y) as f64 * scale);
+            NSBezierPath::fillRect(NSRect::new(origin, NSSize::new(scale, scale)));
+        }
+    }
+    #[allow(deprecated)]
+    image.unlockFocus();
+    image
+}

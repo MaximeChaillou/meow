@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{MainThreadMarker, MainThreadOnly, sel};
+use objc2::{AllocAnyThread, MainThreadMarker, MainThreadOnly, sel};
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSButton, NSScrollView, NSTextAlignment, NSTextField, NSTextView,
     NSView, NSWindow,
@@ -84,6 +84,8 @@ pub enum TranscriptItem {
         time: String,
         mine: bool,
         bodies: Vec<String>,
+        /// The body to mark and scroll to, if any.
+        focus: Option<usize>,
     },
 }
 
@@ -536,6 +538,7 @@ impl SlackPage {
                 },
             ));
         let text = NSMutableAttributedString::new();
+        let mut focused = None;
         for item in items {
             let piece = match item {
                 TranscriptItem::Day(label) => rich_text::slack_day(label),
@@ -544,17 +547,31 @@ impl SlackPage {
                     time,
                     mine,
                     bodies,
-                } => rich_text::slack_run(author, time, *mine, bodies),
+                    focus,
+                } => rich_text::slack_run(author, time, *mine, bodies, *focus),
             };
+            // Emoji go in piece by piece, so the focused run's range stays exact.
+            let piece = NSMutableAttributedString::initWithAttributedString(
+                NSMutableAttributedString::alloc(),
+                &piece,
+            );
+            emoji_text::insert(&piece, emoji);
+            emoji_text::insert_images(&piece, images);
+            if matches!(item, TranscriptItem::Run { focus: Some(_), .. }) {
+                focused = Some(NSRange::new(text.length(), piece.length()));
+            }
             text.appendAttributedString(&piece);
         }
-        emoji_text::insert(&text, emoji);
-        emoji_text::insert_images(&text, images);
         // SAFETY: the text view always owns a text storage.
         if let Some(storage) = unsafe { self.transcript.textStorage() } {
             storage.setAttributedString(&text);
             self.transcript
                 .scrollRangeToVisible(NSRange::new(storage.length(), 0));
+            // From the bottom, scrolling back up just enough puts the focused
+            // run at the top, with what followed it below.
+            if let Some(range) = focused {
+                self.transcript.scrollRangeToVisible(range);
+            }
         }
     }
 

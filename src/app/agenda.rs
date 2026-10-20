@@ -175,5 +175,7 @@ fn calendar_note(change: Change, plan: &str) -> Note {
         link: Some(Link::Plan {
             action: plan.to_string(),
         }),
+        sources: Vec::new(),
+        key: None,
     }
 }

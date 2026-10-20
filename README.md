@@ -11,6 +11,9 @@ use your regular Claude subscription, not API billing.
 - **Click the cat** or press **⌥⇧Space** to open the chat, type a request, press Enter.
 - While Claude works, the cat sits with a `…` bubble. If the reply arrives while
   the chat is closed, it shows a `!` until you click it.
+- When there is unread news in **Activity**, the `!` becomes a bubble with the
+  icons of where it comes from (Slack, GitHub, Linear…; past three sources, one
+  stack icon with their number). Clicking the cat then opens Activity.
 - Answers are rendered from Markdown: headings, bold/italic, code, lists,
   tables, quotes and clickable links.
 - Working steps (tool calls, sub-agents, interim messages) are folded under a
@@ -130,11 +133,15 @@ Linear, GitHub…). Sign in to them once with `/mcp` in Claude Code.
 The **Activity** page collects what happened while you were away: Slack DMs and
 mentions, calendar changes found by the agenda refresh (new, moved or cancelled
 events, new invitations, answers sent), tasks found or resolved by the
-background check, and scheduled tasks that ran or fired. Each new item also
+background check, and scheduled tasks that ran or fired. Each item shows the
+pixel-art icon of where it comes from (Slack, Calendar, GitHub, Linear, Mail,
+Notion…): one icon per source for up to three, and past that a single stack
+icon with their number; hover the icons to see the sources. A Slack sender
+keeps one item per conversation, with only their last message. Each new item also
 shows a macOS banner (the bundled app asks permission once; a `cargo run` build
 posts through `osascript`). Opening the page marks everything read; `×`
 dismisses one item, **Clear all** empties the list, and items go after 7 days.
-Clicking an item opens what it is about.
+Clicking an item opens what it is about: a Slack message opens the Slack page scrolled to that message, highlighted (or to its thread when the reply itself is not loaded).
 
 ### Scheduled tasks
 
@@ -231,12 +238,14 @@ name (`~/Library/Application Support/Lazy`, `~/.config/lazy`) to the new folders
 ```sh
 cargo test                                  # behaviour, sprites, CLI stream parsing
 cargo run --example preview -- sprites.png  # render every pose to a PNG sheet
+cargo run --example activity_preview -- activity.png  # the Activity page with sample news
+cargo run --example news_bubble_preview -- bubble.png  # the cat's news bubble
 ```
 
 To check the look of every page without screen access, run with
 `MEOW_SNAPSHOT_DIR=<folder>`: Meow opens the bubble, saves each page (Chat,
-Tasks, Plan, the Slack list, a conversation and Claude's panel, filled with
-sample messages) as a PNG there, then quits. Snapshots never connect to Slack.
+Tasks, Plan, the Slack list, a conversation, one opened on a marked message and
+Claude's panel, filled with sample messages) as a PNG there, then quits. Snapshots never connect to Slack.
 
 | File                       | Role                                                      |
 |----------------------------|-----------------------------------------------------------|

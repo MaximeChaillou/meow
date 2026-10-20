@@ -151,6 +151,8 @@ pub struct Inputs {
     pub chat_open: bool,
     /// A reply arrived while the chat was closed.
     pub unread: bool,
+    /// Activity has unread news: the cat shows it, but may still wander.
+    pub news: bool,
 }
 
 impl Inputs {
@@ -639,7 +641,7 @@ impl Cat {
             Bubble::None
         } else if inputs.busy {
             Bubble::Dots((self.clock * DOTS_FPS) as u64 as u8 % 3 + 1)
-        } else if inputs.unread || self.is_startled() {
+        } else if inputs.unread || inputs.news || self.is_startled() {
             Bubble::Bang
         } else if self.activity == Activity::Sleeping {
             Bubble::Zzz((self.clock * ZZZ_FPS) as u64 as u8)

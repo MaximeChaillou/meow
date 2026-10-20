@@ -16,6 +16,7 @@ use meow::slack::format::{self, NameMap};
 use meow::slack::keychain;
 use meow::slack::model::{Channel, ChannelKind, Message};
 use meow::slack::timeline::{self, Author, Entry};
+use meow::source::Source;
 
 use crate::ui::emoji_text;
 use crate::ui::sidebar::Page;
@@ -58,6 +59,9 @@ pub struct SlackState {
     /// The open conversation and its messages.
     open: Option<String>,
     messages: Vec<Message>,
+    /// The message to scroll to and mark in the open conversation, as `ts`
+    /// values, best first (the message, then its thread); empty for the latest.
+    focus: Vec<String>,
     /// A line to show while signed out (a prompt or an error).
     status: Option<String>,
     /// The sign-in window, while the user is signing in.
@@ -176,6 +180,7 @@ impl SlackState {
     /// The open conversation, grouped into days and author runs, with names
     /// resolved and bodies in Markdown.
     fn rendered(&self, now: u64) -> Vec<TranscriptItem> {
+        let focus = timeline::first_loaded(&self.messages, &self.focus);
         timeline::timeline(&self.messages, now)
             .into_iter()
             .map(|entry| match entry {
@@ -192,6 +197,9 @@ impl SlackState {
                     },
                     time,
                     mine: matches!(author, Author::User(id) if Some(id) == self.me.as_deref()),
+                    focus: messages
+                        .iter()
+                        .position(|message| Some(message.ts.as_str()) == focus),
                     bodies: messages
                         .into_iter()
                         .map(|message| message_body(message, &self.names, true))
@@ -304,10 +312,23 @@ impl App {
         }
     }
 
-    /// Opens conversation `id` on the Slack page.
+    /// Opens conversation `id` on the Slack page, on its latest messages.
     pub(super) fn open_slack_channel(&mut self, id: String) {
+        self.open_slack_at(id, Vec::new());
+    }
+
+    /// Opens conversation `id` scrolled to message `ts` and marked, or to
+    /// its thread when that reply is not among the conversation's messages.
+    pub(super) fn open_slack_message(&mut self, id: String, ts: String, thread_ts: Option<String>) {
+        let focus = std::iter::once(ts).chain(thread_ts).collect();
+        self.open_slack_at(id, focus);
+    }
+
+    fn open_slack_at(&mut self, id: String, focus: Vec<String>) {
         self.close_slack_assist();
         self.slack.open = Some(id.clone());
+        self.slack.focus = focus;
+        self.read_slack_activity(&id);
         // What was last seen, until Slack sends the latest.
         self.slack.messages = self.slack.cache.history(&id).to_vec();
         // Opening marks it read (the worker tells Slack); reflect that at once.
@@ -331,6 +352,7 @@ impl App {
     pub(super) fn slack_back(&mut self) {
         self.close_slack_assist();
         self.slack.open = None;
+        self.slack.focus.clear();
         self.render_slack();
         self.chat.show_page(Page::Slack);
     }
@@ -341,6 +363,8 @@ impl App {
         if text.is_empty() {
             return;
         }
+        // Back to the latest, where the reply will show.
+        self.slack.focus.clear();
         if let (Some(channel), Some(client)) = (self.slack.open.clone(), self.slack.client.as_ref())
         {
             client.send(Command::Send {
@@ -444,6 +468,8 @@ impl App {
                         .iter()
                         .any(|m| m.user.as_deref() != self.slack.me.as_deref());
                     self.slack.messages.extend(messages);
+                    // Something new: show the latest again.
+                    self.slack.focus.clear();
                     if from_others && !self.slack_visible() {
                         self.unread = true;
                     }
@@ -532,13 +558,22 @@ impl App {
             title.push_str(&format!(" ({} messages)", for_me.len()));
         }
         let detail = message_body(last, &self.slack.names, false);
+        // One item per sender and conversation: their last message replaces the earlier ones.
+        let key = format!(
+            "slack:{channel}:{}",
+            last.user.as_deref().unwrap_or_default()
+        );
         self.notify(Note {
             kind: Kind::Slack,
             title,
             detail: Some(detail),
             link: Some(Link::Slack {
                 channel: channel.to_string(),
+                ts: Some(last.ts.clone()),
+                thread_ts: last.thread_ts.clone(),
             }),
+            sources: vec![Source::Slack],
+            key: Some(key),
         });
     }
 

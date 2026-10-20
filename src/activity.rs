@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::source::Source;
+
 /// Items are forgotten this long after they happened.
 pub const KEEP_SECS: u64 = 7 * 24 * 60 * 60;
 const MAX_ITEMS: usize = 200;
@@ -31,15 +33,31 @@ impl Kind {
             Self::Scheduled => "SCHEDULED",
         }
     }
+
+    /// Where an item of this kind comes from when it does not say.
+    fn default_sources(self) -> Vec<Source> {
+        match self {
+            Self::Slack => vec![Source::Slack],
+            Self::Calendar => vec![Source::Calendar],
+            Self::Tasks => vec![Source::Other],
+            Self::Scheduled => vec![Source::Scheduled],
+        }
+    }
 }
 
 /// Where clicking an item goes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "to", rename_all = "lowercase")]
 pub enum Link {
-    /// A Slack conversation, opened on the Slack page.
+    /// A Slack conversation, opened on the Slack page at one message.
     Slack {
         channel: String,
+        /// The message to show; `None` opens on the latest.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ts: Option<String>,
+        /// Its thread, shown instead when the message itself is not loaded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_ts: Option<String>,
     },
     /// The plan of this quick action.
     Plan {
@@ -63,6 +81,23 @@ pub struct Activity {
     pub read: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<Link>,
+    /// Where the news comes from; empty means its kind's usual source.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<Source>,
+    /// A new item with the same key replaces this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+impl Activity {
+    /// Where the news comes from, for its icons.
+    pub fn sources(&self) -> Vec<Source> {
+        if self.sources.is_empty() {
+            self.kind.default_sources()
+        } else {
+            self.sources.clone()
+        }
+    }
 }
 
 /// What a new item says, before it joins the log.
@@ -72,6 +107,11 @@ pub struct Note {
     pub title: String,
     pub detail: Option<String>,
     pub link: Option<Link>,
+    /// Empty for the kind's usual source.
+    pub sources: Vec<Source>,
+    /// Replaces the item already logged under this key, e.g. one per Slack
+    /// sender and conversation so only their last message shows.
+    pub key: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,9 +131,13 @@ impl ActivityLog {
         self.items.iter().find(|item| item.id == id)
     }
 
-    /// Adds `note` on top, unread; `None` when it has no title.
+    /// Adds `note` on top, unread, in place of any item with its key;
+    /// `None` when it has no title.
     pub fn push(&mut self, note: Note, now: u64) -> Option<&Activity> {
         let title = clean(&note.title)?;
+        if let Some(key) = &note.key {
+            self.items.retain(|item| item.key.as_ref() != Some(key));
+        }
         let item = Activity {
             id: self.next_id,
             kind: note.kind,
@@ -102,6 +146,8 @@ impl ActivityLog {
             at: now,
             read: false,
             link: note.link,
+            sources: note.sources,
+            key: note.key,
         };
         self.next_id += 1;
         self.items.insert(0, item);
@@ -118,6 +164,20 @@ impl ActivityLog {
         let changed = self.unread_count() > 0;
         for item in &mut self.items {
             item.read = true;
+        }
+        changed
+    }
+
+    /// Marks the items `about` picks read; `true` if any was unread.
+    pub fn mark_read_where(&mut self, about: impl Fn(&Activity) -> bool) -> bool {
+        let mut changed = false;
+        for item in self
+            .items
+            .iter_mut()
+            .filter(|item| !item.read && about(item))
+        {
+            item.read = true;
+            changed = true;
         }
         changed
     }
@@ -194,6 +254,8 @@ mod tests {
             title: title.into(),
             detail: Some("  ".into()),
             link: Some(Link::Tasks),
+            sources: Vec::new(),
+            key: None,
         }
     }
 
@@ -226,6 +288,19 @@ mod tests {
     }
 
     #[test]
+    fn some_items_can_be_marked_read() {
+        let mut log = ActivityLog::default();
+        log.push(note("a"), 1);
+        log.push(note("b"), 2);
+        assert!(log.mark_read_where(|item| item.title == "a"));
+        assert!(
+            !log.mark_read_where(|item| item.title == "a"),
+            "already read"
+        );
+        assert_eq!(log.unread_count(), 1);
+    }
+
+    #[test]
     fn ids_stay_unique_after_dismissing() {
         let mut log = ActivityLog::default();
         let a = log.push(note("a"), 1).unwrap().id;
@@ -247,6 +322,52 @@ mod tests {
     }
 
     #[test]
+    fn a_keyed_item_replaces_the_older_one_with_its_key() {
+        let mut log = ActivityLog::default();
+        let keyed = |title: &str, key: &str| Note {
+            key: Some(key.into()),
+            ..note(title)
+        };
+        log.push(keyed("Bo: hi", "slack:D1:bo"), 1);
+        log.push(keyed("Al: yo", "slack:D1:al"), 2);
+        log.push(note("unkeyed"), 3);
+        log.push(keyed("Bo: still there?", "slack:D1:bo"), 4);
+        let titles: Vec<_> = log.items().iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(titles, ["Bo: still there?", "unkeyed", "Al: yo"]);
+    }
+
+    #[test]
+    fn items_without_sources_use_their_kinds() {
+        let mut log = ActivityLog::default();
+        log.push(note("found"), 1);
+        assert_eq!(log.items()[0].sources(), [Source::Other]);
+        log.push(
+            Note {
+                sources: vec![Source::GitHub, Source::Linear],
+                ..note("found")
+            },
+            2,
+        );
+        assert_eq!(log.items()[0].sources(), [Source::GitHub, Source::Linear]);
+        let saved: Activity =
+            serde_json::from_str(r#"{"id":1,"kind":"slack","title":"Bo","at":1}"#).unwrap();
+        assert_eq!(saved.sources(), [Source::Slack]);
+    }
+
+    #[test]
+    fn slack_links_saved_without_a_message_still_load() {
+        let link: Link = serde_json::from_str(r#"{"to":"slack","channel":"D1"}"#).unwrap();
+        assert_eq!(
+            link,
+            Link::Slack {
+                channel: "D1".into(),
+                ts: None,
+                thread_ts: None
+            }
+        );
+    }
+
+    #[test]
     fn lists_name_a_few_then_count_the_rest() {
         assert_eq!(list_titles(&["a", "b"], 3), "a, b");
         assert_eq!(list_titles(&["a", "b", "c", "d"], 2), "a, b and 2 more");
@@ -264,7 +385,11 @@ mod tests {
                 detail: None,
                 link: Some(Link::Slack {
                     channel: "D1".into(),
+                    ts: Some("1729332000.000100".into()),
+                    thread_ts: None,
                 }),
+                sources: vec![Source::Slack],
+                key: Some("slack:D1:U1".into()),
             },
             5,
         );

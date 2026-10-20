@@ -4,6 +4,7 @@ const IDLE: Inputs = Inputs {
     busy: false,
     chat_open: false,
     unread: false,
+    news: false,
 };
 
 #[test]
@@ -63,6 +64,13 @@ fn unread_reply_shows_bang() {
         ..IDLE
     });
     assert_eq!(look.bubble, Bubble::Bang);
+}
+
+#[test]
+fn news_shows_the_bubble_without_keeping_the_cat_put() {
+    let news = Inputs { news: true, ..IDLE };
+    assert_eq!(Cat::new(100.0).look(news).bubble, Bubble::Bang);
+    assert!(!news.holds_cat());
 }
 
 #[test]

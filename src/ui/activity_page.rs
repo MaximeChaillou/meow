@@ -1,15 +1,16 @@
 //! The Activity page: what happened in the background, newest first. Each
-//! item has its kind, when it happened, a link to the thing itself and a ×
-//! to dismiss it; Clear all empties the list.
+//! item has the icons of its sources, when it happened, a link to the thing
+//! itself and a × to dismiss it; Clear all empties the list.
 
 use std::cell::RefCell;
 
-use meow::activity::{Activity, ActivityLog, Kind};
+use meow::activity::{Activity, ActivityLog};
 use meow::clock;
+use meow::source::{self, Icons};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{MainThreadMarker, MainThreadOnly, sel};
-use objc2_app_kit::{NSAutoresizingMaskOptions, NSColor, NSScrollView, NSTextField, NSView};
+use objc2_app_kit::{NSAutoresizingMaskOptions, NSImageView, NSScrollView, NSTextField, NSView};
 use objc2_foundation::{
     NSAttributedString, NSMutableAttributedString, NSPoint, NSRect, NSSize, NSString,
 };
@@ -29,7 +30,12 @@ const ROW_HEIGHT: f64 = 22.0;
 const DETAIL_HEIGHT: f64 = 18.0;
 const CARD_PADDING: f64 = 8.0;
 const CARD_GAP: f64 = 6.0;
-const TAG_WIDTH: f64 = 92.0;
+/// Points per icon pixel.
+const ICON_SCALE: f64 = 2.0;
+const ICON_SIZE: f64 = source::ICON_PIXELS as f64 * ICON_SCALE;
+const ICON_GAP: f64 = 3.0;
+/// Room for the most icons an item shows side by side.
+const ICONS_WIDTH: f64 = source::MAX_SEPARATE_ICONS as f64 * (ICON_SIZE + ICON_GAP) - ICON_GAP;
 const TIME_WIDTH: f64 = 110.0;
 const DISMISS_WIDTH: f64 = 22.0;
 const INDENT: f64 = 6.0;
@@ -132,7 +138,8 @@ impl ActivityPage {
         self.shown_ids.replace(ids);
     }
 
-    /// A card: kind tag, title (opens it), time, ×; the detail below. Returns the y below.
+    /// A card: source icons, title (opens it), time, ×; the detail below.
+    /// Returns the y below.
     fn add_item(&self, index: usize, item: &Activity, width: f64, y: f64, now: u64) -> f64 {
         let target: &AnyObject = &self.target;
         let detail = if item.detail.is_some() {
@@ -152,11 +159,7 @@ impl ActivityPage {
         self.list.addSubview(&card);
         let top = y + CARD_PADDING;
 
-        let tag = Attributes::plain(kind_color(item.kind), theme::label_font(theme::LABEL_SIZE));
-        self.add_label(
-            &rich_text::attributed(item.kind.label(), &tag),
-            rect(2.0 * INDENT, top + 3.0, TAG_WIDTH, ROW_HEIGHT - 3.0),
-        );
+        self.add_icons(item, 2.0 * INDENT, top);
 
         let dismiss_x = width - INDENT - DISMISS_WIDTH;
         let time_x = dismiss_x - TIME_WIDTH;
@@ -181,7 +184,7 @@ impl ActivityPage {
         dismiss.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
         self.list.addSubview(&dismiss);
 
-        let x = 2.0 * INDENT + TAG_WIDTH;
+        let x = 2.0 * INDENT + ICONS_WIDTH + 2.0 * INDENT;
         let frame = rect(x, top, time_x - x - INDENT, ROW_HEIGHT);
         if item.link.is_some() {
             let title = LinkButton::new(
@@ -209,6 +212,24 @@ impl ActivityPage {
         y + height
     }
 
+    /// The icons of the item's sources from `x`, centered on the title row;
+    /// hovering names them.
+    fn add_icons(&self, item: &Activity, x: f64, top: f64) {
+        let icons = Icons::for_sources(&item.sources());
+        let tip = NSString::from_str(&icons_tip(item, &icons));
+        let y = top + (ROW_HEIGHT - ICON_SIZE) / 2.0;
+        for (i, frame) in icons.frames().iter().enumerate() {
+            let left = x + i as f64 * (ICON_SIZE + ICON_GAP);
+            let view = NSImageView::initWithFrame(
+                NSImageView::alloc(self.mtm),
+                rect(left, y, ICON_SIZE, ICON_SIZE),
+            );
+            view.setImage(Some(&widgets::pixel_image(frame, ICON_SCALE)));
+            view.setToolTip(Some(&tip));
+            self.list.addSubview(&view);
+        }
+    }
+
     fn add_label(&self, text: &NSAttributedString, frame: NSRect) -> Retained<NSTextField> {
         let label = NSTextField::labelWithAttributedString(text, self.mtm);
         label.setFrame(frame);
@@ -218,12 +239,16 @@ impl ActivityPage {
     }
 }
 
-fn kind_color(kind: Kind) -> Retained<NSColor> {
-    match kind {
-        Kind::Slack => theme::link(),
-        Kind::Calendar => theme::live(),
-        Kind::Tasks => theme::highlight(),
-        Kind::Scheduled => theme::accent(),
+/// "Slack", or "Tasks: GitHub and Linear" when the sources are not the kind itself.
+fn icons_tip(item: &Activity, icons: &Icons) -> String {
+    let sources = icons.describe();
+    let kind = item.kind.label();
+    let mut name = kind[..1].to_string();
+    name.push_str(&kind[1..].to_lowercase());
+    if sources == name {
+        sources
+    } else {
+        format!("{name}: {sources}")
     }
 }
 

@@ -1,9 +1,12 @@
 //! The Activity page on the app side: background events become items in the
-//! log and macOS banners. Opening the page marks them read; each can be
-//! dismissed, or all cleared.
+//! log and macOS banners, and the cat shows where unread ones come from.
+//! Opening the page marks them read; each can be dismissed, or all cleared.
 
 use meow::activity::{self, ActivityLog, Kind, Link, Note};
 use meow::conversations::ChatId;
+use meow::source::{self, Icons};
+use meow::sprites::{Bubble, Facing, Look};
+use objc2_foundation::{NSPoint, NSRect};
 
 use crate::ui::notify;
 use crate::ui::sidebar::Page;
@@ -100,9 +103,16 @@ impl App {
             return;
         };
         match link {
-            Link::Slack { channel } => {
+            Link::Slack {
+                channel,
+                ts,
+                thread_ts,
+            } => {
                 self.show_slack();
-                self.open_slack_channel(channel);
+                match ts {
+                    Some(ts) => self.open_slack_message(channel, ts, thread_ts),
+                    None => self.open_slack_channel(channel),
+                }
             }
             Link::Plan { action } => {
                 if let Some(index) = self.actions.iter().position(|a| a.title == action) {
@@ -119,6 +129,44 @@ impl App {
             && self.activity.log.dismiss(id)
         {
             self.activity_changed();
+        }
+    }
+
+    /// Opening a Slack conversation reads its news.
+    pub(super) fn read_slack_activity(&mut self, channel: &str) {
+        let about = |item: &activity::Activity| matches!(&item.link, Some(Link::Slack { channel: c, .. }) if c == channel);
+        if self.activity.log.mark_read_where(about) {
+            self.activity_changed();
+        }
+    }
+
+    /// Where `look` would show its `!` and news is unread, shows the news's
+    /// icons in a bubble above the cat (drawn at `origin` on `screen`)
+    /// instead; returns the look to draw the cat with.
+    pub(super) fn show_news(&mut self, look: Look, origin: NSPoint, screen: NSRect) -> Look {
+        let sources: Vec<_> = self
+            .activity
+            .log
+            .items()
+            .iter()
+            .filter(|item| !item.read)
+            .flat_map(|item| item.sources())
+            .collect();
+        if look.bubble != Bubble::Bang || sources.is_empty() {
+            self.news_bubble.hide();
+            self.last_news = None;
+            return look;
+        }
+        let shown = (Icons::for_sources(&sources), look.facing);
+        if self.last_news.as_ref() != Some(&shown) {
+            let bubble = source::news_bubble(&shown.0, look.facing == Facing::Right);
+            self.news_bubble.show(&bubble);
+            self.last_news = Some(shown);
+        }
+        self.news_bubble.place(origin, look.facing, screen);
+        Look {
+            bubble: Bubble::None,
+            ..look
         }
     }
 

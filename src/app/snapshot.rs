@@ -17,7 +17,7 @@ use crate::ui::slack_page::{ConversationRow, TranscriptItem};
 use super::App;
 
 /// The pages, in order; each is saved once it has settled.
-const STEPS: [&str; 8] = [
+const STEPS: [&str; 9] = [
     "chat",
     "chat-two-lines",
     "chat-long",
@@ -25,6 +25,7 @@ const STEPS: [&str; 8] = [
     "plan",
     "slack-list",
     "slack-conversation",
+    "slack-focus",
     "slack-assist",
 ];
 /// Time for the app to settle before the first step (fonts, tasks).
@@ -110,6 +111,14 @@ impl App {
                         &Default::default(),
                     );
             }
+            "slack-focus" => {
+                self.chat.slack().render_conversation(
+                    "Hugo",
+                    &focused_transcript(),
+                    &Default::default(),
+                    &Default::default(),
+                );
+            }
             _ => {
                 let attendees = ["toi".to_string(), "Hugo".to_string()];
                 self.chat.slack().show_assist(&AssistView::Event {
@@ -160,6 +169,7 @@ fn sample_transcript() -> Vec<TranscriptItem> {
         time: time.to_string(),
         mine,
         bodies: bodies.iter().map(|b| b.to_string()).collect(),
+        focus: None,
     };
     vec![
         TranscriptItem::Day("Today".to_string()),
@@ -172,6 +182,48 @@ fn sample_transcript() -> Vec<TranscriptItem> {
         run("Toi", "09:42", true, &["Oui, le matin m'arrange."]),
         run("Hugo", "09:42", false, &["Top, merci !"]),
     ]
+}
+
+/// A long conversation opened from Activity on one of Hugo's earlier messages.
+fn focused_transcript() -> Vec<TranscriptItem> {
+    let run =
+        |author: &str, time: &str, bodies: &[&str], focus: Option<usize>| TranscriptItem::Run {
+            author: author.to_string(),
+            time: time.to_string(),
+            mine: author == "Toi",
+            bodies: bodies.iter().map(|b| b.to_string()).collect(),
+            focus,
+        };
+    let mut items = vec![TranscriptItem::Day("Today".to_string())];
+    for hour in 8..11 {
+        items.push(run(
+            "Inès",
+            &format!("{hour:02}:05"),
+            &["Le build de nuit est passé."],
+            None,
+        ));
+        items.push(run("Toi", &format!("{hour:02}:20"), &["Merci !"], None));
+    }
+    items.push(run(
+        "Hugo",
+        "11:02",
+        &[
+            "Petite question sur la PR Android :",
+            "@Toi tu peux relire le module paiement avant midi ?",
+            "Sinon je décale la mise en prod.",
+        ],
+        Some(1),
+    ));
+    for hour in 12..16 {
+        items.push(run(
+            "Inès",
+            &format!("{hour:02}:10"),
+            &["Point café ?"],
+            None,
+        ));
+        items.push(run("Léa", &format!("{hour:02}:30"), &["Go"], None));
+    }
+    items
 }
 
 fn sample_chat() -> Transcript {

@@ -194,6 +194,8 @@ impl App {
             title,
             detail: Some(detail),
             link: None,
+            sources: Vec::new(),
+            key: None,
         });
     }
 
@@ -226,6 +228,8 @@ impl App {
                 title: routine.name.clone(),
                 detail: Some(detail),
                 link: None,
+                sources: Vec::new(),
+                key: None,
             });
         }
         let Some(Ok(env)) = &self.claude else {

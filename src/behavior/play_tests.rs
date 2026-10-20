@@ -10,6 +10,7 @@ const IDLE: Inputs = Inputs {
     busy: false,
     chat_open: false,
     unread: false,
+    news: false,
 };
 
 const SCREEN: Bounds = Bounds {

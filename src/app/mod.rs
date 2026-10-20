@@ -36,7 +36,8 @@ use meow::behavior::{Bounds, Cat, Inputs, PropView, Rng};
 use meow::claude::ClaudeEnv;
 use meow::conversations::{ChatId, Conversation, Conversations};
 use meow::settings::Settings;
-use meow::sprites::{Look, render, render_prop};
+use meow::source::Icons;
+use meow::sprites::{Facing, Look, render, render_prop};
 use meow::tasks::{self, TaskList};
 use meow::transcript::Transcript;
 use objc2::MainThreadMarker;
@@ -49,6 +50,7 @@ use crate::ui::chat_window::ChatWindow;
 use crate::ui::controller::Controller;
 use crate::ui::events::{self, UiEvent};
 use crate::ui::menus;
+use crate::ui::news_bubble::NewsBubbleWindow;
 use crate::ui::pointer;
 use crate::ui::screens;
 use crate::ui::sidebar::{Page, Selection};
@@ -73,6 +75,10 @@ struct App {
     /// The cat's bowl, or the mouse it chases.
     prop_window: CatWindow,
     last_prop: Option<PropView>,
+    /// Where unread news comes from, above the cat's head in place of its `!`.
+    news_bubble: NewsBubbleWindow,
+    /// The icons and side the bubble last showed them on.
+    last_news: Option<(Icons, Facing)>,
     /// Where the cat holds the pointer still, while it has it caught.
     held_pointer: Option<NSPoint>,
     chat: ChatWindow,
@@ -207,6 +213,8 @@ pub fn start(mtm: MainThreadMarker) {
         cat_overflow: CatWindow::overflow(mtm),
         prop_window,
         last_prop: None,
+        news_bubble: NewsBubbleWindow::new(mtm),
+        last_news: None,
         held_pointer: None,
         chat,
         conversations,
@@ -370,6 +378,7 @@ impl App {
             busy: self.run.is_some(),
             chat_open: self.chat.is_visible(),
             unread: self.unread,
+            news: self.activity.log.unread_count() > 0,
         }
     }
 
@@ -402,6 +411,8 @@ impl App {
         self.hold_pointer(ground);
 
         let look = self.cat.look(inputs);
+        let origin = NSPoint::new(self.cat.x, ground + self.cat.y);
+        let look = self.show_news(look, origin, frame);
         if self.last_look != Some(look) {
             let sprite = render(&look, self.settings.coat);
             self.cat_overflow.view.show(sprite.clone());
@@ -568,6 +579,9 @@ impl App {
             // A reply is waiting: show it rather than whatever was open.
             self.unread = false;
             self.show_conversation(self.unread_chat.clone());
+        } else if self.activity.log.unread_count() > 0 {
+            // The bubble over the cat showed news: show where it is.
+            return self.show_activity();
         }
         self.open_window();
     }

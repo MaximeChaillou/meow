@@ -236,11 +236,13 @@ pub fn slack_day(label: &str) -> Retained<NSAttributedString> {
 
 /// A run of Slack messages by one author: an initials chip, the name in bold
 /// and the time once, then each body rendered from Markdown, indented past the chip.
+/// One author's run of messages; body `focus`, if any, is marked.
 pub fn slack_run(
     author: &str,
     time: &str,
     mine: bool,
     bodies: &[String],
+    focus: Option<usize>,
 ) -> Retained<NSAttributedString> {
     let result = NSMutableAttributedString::new();
     result.appendAttributedString(&slack_gap());
@@ -261,18 +263,26 @@ pub fn slack_run(
     let style = NSMutableParagraphStyle::new();
     style.setFirstLineHeadIndent(SLACK_INDENT);
     style.setHeadIndent(SLACK_INDENT);
-    for body in bodies {
+    for (index, body) in bodies.iter().enumerate() {
         let text = NSMutableAttributedString::initWithAttributedString(
             NSMutableAttributedString::alloc(),
             &markdown(body, theme::ink()),
         );
-        // SAFETY: the paragraph-style attribute holds an NSParagraphStyle, as AppKit expects.
+        // SAFETY: the paragraph-style attribute holds an NSParagraphStyle, and
+        // the background one an NSColor, as AppKit expects.
         unsafe {
             text.addAttribute_value_range(
                 NSParagraphStyleAttributeName,
                 &style,
                 NSRange::new(0, text.length()),
             );
+            if focus == Some(index) {
+                text.addAttribute_value_range(
+                    NSBackgroundColorAttributeName,
+                    &theme::field_border(),
+                    NSRange::new(0, text.length()),
+                );
+            }
         }
         result.appendAttributedString(&text);
     }

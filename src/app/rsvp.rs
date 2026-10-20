@@ -97,6 +97,8 @@ impl App {
                         title: format!("{verb}: {}", pending.title),
                         detail: None,
                         link: None,
+                        sources: Vec::new(),
+                        key: None,
                     });
                 }
                 Some(Err(reason)) => self.rsvp_failed(&pending.title, &reason),
@@ -113,6 +115,8 @@ impl App {
             title: format!("Could not answer: {what}"),
             detail: Some(reason.to_string()),
             link: None,
+            sources: Vec::new(),
+            key: None,
         });
         let active = self.conversations.active().clone();
         self.error_in(

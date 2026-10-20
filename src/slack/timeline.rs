@@ -76,6 +76,14 @@ pub fn timeline(messages: &[Message], now: u64) -> Vec<Entry<'_>> {
     entries
 }
 
+/// The first of `wanted` (message `ts`, best first) that is among `messages`.
+pub fn first_loaded<'a>(messages: &[Message], wanted: &'a [String]) -> Option<&'a str> {
+    wanted
+        .iter()
+        .find(|ts| messages.iter().any(|m| &m.ts == *ts))
+        .map(String::as_str)
+}
+
 /// A compact label for the list: "14:32", "Yesterday", "Mon", "12 Oct".
 pub fn list_label(ts: &str, now: u64) -> String {
     let (Some(at), Some(today)) = (ts_secs(ts), clock::local(now)) else {
@@ -214,6 +222,21 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn the_wanted_message_falls_back_to_its_thread_when_not_loaded() {
+        let messages = [message("U1", 100), message("U1", 200)];
+        let wanted = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let reply_in_thread = wanted(&["300.000100", "100.000100"]);
+        assert_eq!(
+            first_loaded(&messages, &reply_in_thread),
+            Some("100.000100")
+        );
+        let loaded = wanted(&["200.000100", "100.000100"]);
+        assert_eq!(first_loaded(&messages, &loaded), Some("200.000100"));
+        assert_eq!(first_loaded(&messages, &wanted(&["999.0"])), None);
+        assert_eq!(first_loaded(&messages, &[]), None);
     }
 
     #[test]

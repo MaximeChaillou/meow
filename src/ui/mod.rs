@@ -9,6 +9,7 @@ pub mod events;
 pub mod flipped;
 pub mod link_button;
 pub mod menus;
+pub mod news_bubble;
 pub mod notify;
 pub mod plan_page;
 pub mod pointer;

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use meow::activity::{self, Kind, Link, Note};
 use meow::claude::{ClaudeEvent, Run};
 use meow::clock;
+use meow::source::Source;
 use meow::{sync, tasks};
 
 use super::{App, now_secs};
@@ -119,27 +120,30 @@ impl App {
         match outcome.and_then(|answer| sync::parse(&answer)) {
             Ok(report) => {
                 let now = now_secs();
-                let closed_titles: Vec<String> = report
+                let closed_tasks: Vec<(String, Source)> = report
                     .done
                     .iter()
                     .filter_map(|id| self.tasks.get(id))
                     .filter(|task| !task.is_done())
-                    .map(|task| task.title.clone())
+                    .map(|task| (task.title.clone(), Source::parse(&task.source)))
                     .collect();
-                let new_titles: Vec<&str> = report
+                let new_tasks: Vec<(&str, Source)> = report
                     .new
                     .iter()
                     .filter(|found| {
                         tasks::id_for(found).is_some() && self.tasks.find(found).is_none()
                     })
-                    .map(|found| found.title.as_str())
+                    .map(|found| {
+                        let source = found.source.as_deref().map_or(Source::Other, Source::parse);
+                        (found.title.as_str(), source)
+                    })
                     .collect();
                 let closed = self.tasks.close_resolved(&report.done, now);
                 let added = self.tasks.merge(&report.new, now);
                 if closed + added > 0 {
                     self.tasks_changed();
                 }
-                self.notify_task_changes(&new_titles, &closed_titles);
+                self.notify_task_changes(&new_tasks, &closed_tasks);
                 // New things are looked for from when this check started.
                 self.sync.last_ok = Some(self.sync.started_at);
                 self.sync.last_failed = false;
@@ -152,27 +156,33 @@ impl App {
         self.show_sync_status();
     }
 
-    /// One Activity item for the tasks a check added, one for those it closed.
-    fn notify_task_changes(&mut self, added: &[&str], closed: &[String]) {
+    /// One Activity item for the tasks a check added, one for those it
+    /// closed, each with the sources they come from.
+    fn notify_task_changes(&mut self, added: &[(&str, Source)], closed: &[(String, Source)]) {
         let count = |n: usize, what: &str| match n {
             1 => format!("1 {what}"),
             n => format!("{n} {what}s"),
         };
         if !added.is_empty() {
+            let titles: Vec<&str> = added.iter().map(|(title, _)| *title).collect();
             self.notify(Note {
                 kind: Kind::Tasks,
                 title: format!("{} waiting on you", count(added.len(), "new task")),
-                detail: Some(activity::list_titles(added, 3)),
+                detail: Some(activity::list_titles(&titles, 3)),
                 link: Some(Link::Tasks),
+                sources: added.iter().map(|&(_, source)| source).collect(),
+                key: None,
             });
         }
         if !closed.is_empty() {
-            let titles: Vec<&str> = closed.iter().map(String::as_str).collect();
+            let titles: Vec<&str> = closed.iter().map(|(title, _)| title.as_str()).collect();
             self.notify(Note {
                 kind: Kind::Tasks,
                 title: format!("{} resolved at the source", count(closed.len(), "task")),
                 detail: Some(activity::list_titles(&titles, 3)),
                 link: Some(Link::Tasks),
+                sources: closed.iter().map(|&(_, source)| source).collect(),
+                key: None,
             });
         }
     }

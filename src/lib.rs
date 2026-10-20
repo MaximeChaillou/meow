@@ -16,6 +16,7 @@ pub mod rsvp;
 pub mod schedule;
 pub mod settings;
 pub mod slack;
+pub mod source;
 pub mod sprites;
 pub mod superset;
 pub mod sync;

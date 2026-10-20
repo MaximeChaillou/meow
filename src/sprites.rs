@@ -22,6 +22,8 @@ pub const CAT_H: usize = 14;
 pub const CANVAS_H: usize = BUBBLE_H + CAT_H;
 
 const BUBBLE_X: usize = 14;
+/// Canvas column of the bubble's tail, just above the head of a cat facing right.
+pub const BUBBLE_TAIL_X: usize = BUBBLE_X + 2;
 const HEART: [&str; 4] = [".r.r.", "rrrrr", ".rrr.", "..r.."];
 /// Left column of each rising heart, above the cat's head and back.
 const HEART_LANES: [isize; 3] = [7, 12, 17];
