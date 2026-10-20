@@ -125,6 +125,7 @@ const SCREEN: Bounds = Bounds {
     min_x: 0.0,
     max_x: 1000.0,
     max_y: 800.0,
+    open: OpenEdges::NONE,
 };
 
 fn run(cat: &mut Cat, seconds: f64, rng: &mut Rng) {
@@ -441,6 +442,91 @@ fn gentle_upward_throw_just_bumps_the_top() {
     cat.y = SCREEN.max_y - 1.0;
     cat.update(1.0 / 60.0, SCREEN, IDLE, &mut Rng::new(1));
     assert_ne!(cat.activity(), Activity::Clinging);
+}
+
+/// The screen with another screen past its right edge and one above it.
+const BETWEEN_SCREENS: Bounds = Bounds {
+    open: OpenEdges {
+        left: false,
+        right: true,
+        top: true,
+    },
+    ..SCREEN
+};
+
+/// Runs a thrown cat for `seconds` between screens, checking it never clings,
+/// and returns the furthest right and highest it flew.
+fn fly_between_screens(cat: &mut Cat, seconds: f64) -> (f64, f64) {
+    let mut rng = Rng::new(1);
+    let (mut right, mut high) = (cat.x, cat.y);
+    for _ in 0..(seconds * 240.0) as usize {
+        cat.update(1.0 / 240.0, BETWEEN_SCREENS, IDLE, &mut rng);
+        assert_ne!(cat.activity(), Activity::Clinging);
+        right = right.max(cat.x);
+        high = high.max(cat.y);
+    }
+    (right, high)
+}
+
+#[test]
+fn hard_throw_flies_on_to_the_next_screen() {
+    let mut cat = thrown_right(900.0, 600.0);
+    let (right, _) = fly_between_screens(&mut cat, 1.0);
+    assert!(right > SCREEN.max_x + CAT_WIDTH, "flew to x = {right}");
+}
+
+#[test]
+fn upward_throw_flies_on_to_the_screen_above() {
+    let mut cat = thrown_up(1200.0, 400.0);
+    let (_, high) = fly_between_screens(&mut cat, 0.5);
+    assert!(high > SCREEN.max_y, "flew to y = {high}");
+}
+
+#[test]
+fn edges_without_a_screen_past_them_stay_walls() {
+    let mut cat = held_cat_at(300.0, 600.0);
+    for _ in 0..10 {
+        cat.drag_to(cat.x - 900.0 / 60.0, 600.0);
+        cat.update(1.0 / 60.0, BETWEEN_SCREENS, IDLE, &mut Rng::new(1));
+    }
+    cat.release();
+    let mut rng = Rng::new(1);
+    while cat.activity() == Activity::Falling {
+        cat.update(1.0 / 240.0, BETWEEN_SCREENS, IDLE, &mut rng);
+    }
+    assert_eq!(cat.activity(), Activity::Clinging);
+    assert_eq!(cat.x, SCREEN.min_x);
+}
+
+#[test]
+fn cat_thrown_up_from_the_screen_below_rises_before_it_lands() {
+    let mut cat = thrown_up(1200.0, 400.0);
+    // It just came through the bottom of this screen, still going up.
+    cat.y = -5.0;
+    cat.update(1.0 / 60.0, SCREEN, IDLE, &mut Rng::new(1));
+    assert_eq!(cat.activity(), Activity::Falling);
+    assert!(cat.y > 0.0, "still rising at y = {}", cat.y);
+    assert!(run_until(&mut cat, Activity::Idle, 3.0));
+    assert_eq!(cat.y, 0.0);
+}
+
+#[test]
+fn held_cat_moved_to_another_screens_ground_is_not_thrown() {
+    let mut cat = held_cat_at(300.0, 400.0);
+    cat.raise_ground(150.0);
+    assert_eq!(cat.y, 250.0);
+    cat.update(1.0 / 60.0, SCREEN, IDLE, &mut Rng::new(1));
+    cat.release();
+    assert!(cat.vy.abs() < 1.0, "thrown at vy = {}", cat.vy);
+}
+
+#[test]
+fn held_cat_can_be_carried_to_the_next_screen() {
+    let mut cat = Cat::new(100.0);
+    cat.grab();
+    cat.drag_to(1050.0, 5000.0);
+    cat.update(0.016, BETWEEN_SCREENS, IDLE, &mut Rng::new(1));
+    assert_eq!((cat.x, cat.y), (1050.0, 5000.0));
 }
 
 #[test]

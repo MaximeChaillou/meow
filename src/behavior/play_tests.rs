@@ -16,6 +16,7 @@ const SCREEN: Bounds = Bounds {
     min_x: 0.0,
     max_x: 1000.0,
     max_y: 800.0,
+    open: OpenEdges::NONE,
 };
 
 const TICK: f64 = 1.0 / 60.0;

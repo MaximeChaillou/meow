@@ -14,6 +14,7 @@ pub mod plan_page;
 pub mod pointer;
 pub mod rich_text;
 pub mod routines_page;
+pub mod screens;
 pub mod sidebar;
 pub mod signin;
 pub mod slack_assist;
