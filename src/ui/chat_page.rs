@@ -4,21 +4,22 @@ use meow::transcript::Transcript;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadMarker, MainThreadOnly, sel};
-use objc2_app_kit::{NSAutoresizingMaskOptions, NSTextField, NSTextView, NSView, NSWindow};
-use objc2_foundation::{NSPoint, NSRange, NSRect, NSSize, NSString};
+use objc2_app_kit::{NSAutoresizingMaskOptions, NSTextView, NSView, NSWindow};
+use objc2_foundation::{NSPoint, NSRange, NSRect, NSSize};
 
+use super::bubble;
 use super::controller::Controller;
 use super::rich_text;
 use super::widgets;
 
-const MARGIN: f64 = 10.0;
-const INPUT_HEIGHT: f64 = 28.0;
+/// Space between the transcript and the page's edges.
+const MARGIN: f64 = 16.0;
 const BUTTON_WIDTH: f64 = 64.0;
 
 pub struct ChatPage {
     pub view: Retained<NSView>,
     transcript: Retained<NSTextView>,
-    input: Retained<NSTextField>,
+    input: Retained<widgets::GrowingField>,
 }
 
 impl ChatPage {
@@ -28,19 +29,11 @@ impl ChatPage {
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
-        let (width, height) = (frame.size.width, frame.size.height);
+        // The page runs under the bubble's right padding; content keeps clear of it.
+        let (width, height) = (frame.size.width - bubble::PADDING, frame.size.height);
         let target: &AnyObject = controller;
 
         let input = widgets::text_field(mtm, "Ask the cat… (Esc: cancel / close)");
-        input.setFrame(rect(
-            MARGIN,
-            MARGIN,
-            width - 3.0 * MARGIN - BUTTON_WIDTH,
-            INPUT_HEIGHT,
-        ));
-        input.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMaxYMargin,
-        );
         // SAFETY: the controller lives as long as the app, so the weak target stays valid.
         unsafe {
             input.setTarget(Some(target));
@@ -48,22 +41,23 @@ impl ChatPage {
         }
         // SAFETY: the controller outlives the field, so the weak delegate stays valid.
         unsafe { input.setDelegate(Some(ProtocolObject::from_ref(controller))) };
-        view.addSubview(&input);
 
-        let new_button = widgets::text_button(mtm, "New", target, sel!(newConversation:));
-        new_button.setFrame(rect(
-            width - MARGIN - BUTTON_WIDTH,
-            MARGIN - 2.0,
-            BUTTON_WIDTH,
-            INPUT_HEIGHT + 4.0,
-        ));
-        new_button.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxYMargin,
+        let new_button = widgets::text_button(
+            mtm,
+            "New",
+            widgets::ButtonStyle::Quiet,
+            target,
+            sel!(newConversation:),
         );
-        view.addSubview(&new_button);
+        let top = widgets::composer(
+            mtm,
+            &view,
+            &input,
+            &[],
+            &[(&new_button, BUTTON_WIDTH, widgets::ButtonStyle::Quiet)],
+        ) + MARGIN;
 
         let scroll = NSTextView::scrollableTextView(mtm);
-        let top = 2.0 * MARGIN + INPUT_HEIGHT;
         scroll.setFrame(rect(
             MARGIN,
             top,
@@ -80,12 +74,17 @@ impl ChatPage {
             .and_then(|view| view.downcast::<NSTextView>().ok())
             .expect("scrollable text view contains a text view");
         transcript.setEditable(false);
+        // Message boxes are text blocks, which only TextKit 1 lays out right;
+        // asking for the layout manager switches the view over to it.
+        // SAFETY: a plain getter on a text view the page owns.
+        let _ = unsafe { transcript.layoutManager() };
         // The bubble's paper shows through.
         transcript.setDrawsBackground(false);
         transcript.setTextContainerInset(NSSize::new(4.0, 6.0));
         rich_text::style_links(&transcript);
         transcript.setDelegate(Some(ProtocolObject::from_ref(controller)));
         view.addSubview(&scroll);
+        input.keep_clear(&scroll);
 
         Self {
             view,
@@ -98,9 +97,14 @@ impl ChatPage {
         window.makeFirstResponder(Some(&self.input));
     }
 
+    /// Puts `text` in the input, as if typed (debug snapshots).
+    pub fn set_draft(&self, text: &str) {
+        self.input.set_text(text);
+    }
+
     pub fn take_input(&self) -> String {
         let text = self.input.stringValue().to_string();
-        self.input.setStringValue(&NSString::from_str(""));
+        self.input.set_text("");
         text
     }
 

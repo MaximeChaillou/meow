@@ -8,19 +8,20 @@ use objc2::{AllocAnyThread, Message};
 use objc2_app_kit::{
     NSBackgroundColorAttributeName, NSColor, NSCursor, NSCursorAttributeName, NSFont,
     NSFontAttributeName, NSForegroundColorAttributeName, NSLinkAttributeName,
-    NSStrikethroughStyleAttributeName, NSStrokeWidthAttributeName, NSTextView,
+    NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSStrikethroughStyleAttributeName,
+    NSStrokeWidthAttributeName, NSTextBlock, NSTextBlockLayer, NSTextBlockValueType, NSTextView,
     NSUnderlineStyleAttributeName,
 };
 use objc2_foundation::{
-    NSAttributedString, NSAttributedStringKey, NSDictionary, NSMutableAttributedString, NSNumber,
-    NSString, NSURL,
+    NSArray, NSAttributedString, NSAttributedStringKey, NSDictionary, NSMutableAttributedString,
+    NSNumber, NSRange, NSRectEdge, NSString, NSURL,
 };
 
 use super::theme;
 
 pub const BODY_SIZE: f64 = theme::BODY_SIZE;
 const HEADING_SIZES: [f64; 3] = [24.0, 21.0, 19.0];
-/// Stroke that thickens the single-weight pixel font into bold (negative: fill and stroke).
+/// Stroke that thickens the pixel font into bold (negative: fill and stroke).
 const HEAVY_STROKE: f64 = -3.0;
 
 /// How one run of text looks.
@@ -120,12 +121,13 @@ fn block_text(block: &Block) -> Retained<NSAttributedString> {
     };
     let small = || theme::font(theme::SMALL_SIZE);
     match block {
-        Block::User(text) => attributed(
-            &format!("\n> {text}\n"),
-            &Attributes {
-                heavy: true,
-                ..Attributes::plain(theme::accent(), theme::font(BODY_SIZE))
-            },
+        Block::User(text) => boxed(
+            &attributed(
+                &format!("{text}\n"),
+                &Attributes::plain(theme::ink(), theme::font(BODY_SIZE)),
+            ),
+            &theme::user_bubble(),
+            Side::Right,
         ),
         Block::Info(text) => line(format!("{text}\n"), theme::muted(), small()),
         Block::Error(text) => line(
@@ -150,8 +152,72 @@ fn block_text(block: &Block) -> Retained<NSAttributedString> {
             )
         }
         Block::Note(text) => markdown(text, theme::muted()),
-        Block::Answer(text) => markdown(text, theme::ink()),
+        Block::Answer(text) => boxed(&markdown(text, theme::ink()), &theme::sidebar(), Side::Left),
     }
+}
+
+/// Which side of the transcript a message box keeps to.
+enum Side {
+    Left,
+    Right,
+}
+
+/// Space inside a message box.
+const BOX_PADDING: f64 = 10.0;
+/// Space above and below a message box.
+const BOX_GAP: f64 = 6.0;
+/// The share of the width left free on the far side of a message box.
+const BOX_OFFSET_PERCENT: f64 = 20.0;
+/// The share of the width a message box's text takes (its padding comes on top).
+const BOX_WIDTH_PERCENT: f64 = 76.0;
+
+/// `text` (whole paragraphs) inside one padded box of `fill`, kept to `side`.
+fn boxed(text: &NSAttributedString, fill: &NSColor, side: Side) -> Retained<NSAttributedString> {
+    let block = NSTextBlock::new();
+    block.setBackgroundColor(Some(fill));
+    // The block paints its background over its margins too, so the space
+    // around the box is a border in the page's own color, drawn on top.
+    block.setBorderColor(Some(&theme::paper()));
+    // Without a content width the block shrinks to nothing.
+    block.setContentWidth_type(BOX_WIDTH_PERCENT, NSTextBlockValueType::PercentageValueType);
+    block.setWidth_type_forLayer(
+        BOX_PADDING,
+        NSTextBlockValueType::AbsoluteValueType,
+        NSTextBlockLayer::Padding,
+    );
+    for edge in [NSRectEdge::MinY, NSRectEdge::MaxY] {
+        block.setWidth_type_forLayer_edge(
+            BOX_GAP,
+            NSTextBlockValueType::AbsoluteValueType,
+            NSTextBlockLayer::Border,
+            edge,
+        );
+    }
+    let far = match side {
+        Side::Left => NSRectEdge::MaxX,
+        Side::Right => NSRectEdge::MinX,
+    };
+    block.setWidth_type_forLayer_edge(
+        BOX_OFFSET_PERCENT,
+        NSTextBlockValueType::PercentageValueType,
+        NSTextBlockLayer::Border,
+        far,
+    );
+    let style = NSMutableParagraphStyle::new();
+    style.setTextBlocks(&NSArray::from_retained_slice(&[block]));
+    let result = NSMutableAttributedString::initWithAttributedString(
+        NSMutableAttributedString::alloc(),
+        text,
+    );
+    // SAFETY: the paragraph-style attribute holds an NSParagraphStyle, as AppKit expects.
+    unsafe {
+        result.addAttribute_value_range(
+            NSParagraphStyleAttributeName,
+            &style,
+            NSRange::new(0, result.length()),
+        );
+    }
+    result.into_super()
 }
 
 /// Height of the blank line that separates runs of Slack messages.
@@ -168,8 +234,8 @@ pub fn slack_day(label: &str) -> Retained<NSAttributedString> {
     result.into_super()
 }
 
-/// A run of Slack messages by one author: the name in bold (in the link color
-/// when it is our own) and the time once, then each body rendered from Markdown.
+/// A run of Slack messages by one author: an initials chip, the name in bold
+/// and the time once, then each body rendered from Markdown, indented past the chip.
 pub fn slack_run(
     author: &str,
     time: &str,
@@ -178,20 +244,69 @@ pub fn slack_run(
 ) -> Retained<NSAttributedString> {
     let result = NSMutableAttributedString::new();
     result.appendAttributedString(&slack_gap());
-    let name_color = if mine { theme::link() } else { theme::accent() };
+    let chip = Attributes {
+        background: Some(avatar_color(author, mine)),
+        ..Attributes::plain(theme::on_accent(), theme::label_font(theme::LABEL_SIZE))
+    };
+    result.appendAttributedString(&attributed(&format!(" {} ", initials(author)), &chip));
     let name = Attributes {
         heavy: true,
-        ..Attributes::plain(name_color, theme::font(theme::SMALL_SIZE))
+        ..Attributes::plain(theme::ink(), theme::font(theme::SMALL_SIZE))
     };
-    result.appendAttributedString(&attributed(author, &name));
+    result.appendAttributedString(&attributed(&format!("  {author}"), &name));
     result.appendAttributedString(&attributed(
         &format!("  {time}\n"),
         &Attributes::plain(theme::muted(), theme::font(theme::SMALL_SIZE)),
     ));
+    let style = NSMutableParagraphStyle::new();
+    style.setFirstLineHeadIndent(SLACK_INDENT);
+    style.setHeadIndent(SLACK_INDENT);
     for body in bodies {
-        result.appendAttributedString(&markdown(body, theme::ink()));
+        let text = NSMutableAttributedString::initWithAttributedString(
+            NSMutableAttributedString::alloc(),
+            &markdown(body, theme::ink()),
+        );
+        // SAFETY: the paragraph-style attribute holds an NSParagraphStyle, as AppKit expects.
+        unsafe {
+            text.addAttribute_value_range(
+                NSParagraphStyleAttributeName,
+                &style,
+                NSRange::new(0, text.length()),
+            );
+        }
+        result.appendAttributedString(&text);
     }
     result.into_super()
+}
+
+/// How far message bodies sit from the left, past the initials chip.
+const SLACK_INDENT: f64 = 40.0;
+
+/// "HU" for Hugo, "IC" for Inès Clavel.
+fn initials(name: &str) -> String {
+    let words: Vec<&str> = name.split_whitespace().collect();
+    let letters: String = match words.as_slice() {
+        [first, second, ..] => first
+            .chars()
+            .take(1)
+            .chain(second.chars().take(1))
+            .collect(),
+        [only] => only.chars().take(2).collect(),
+        [] => "?".to_string(),
+    };
+    letters.to_uppercase()
+}
+
+/// A stable chip color per author; gold for the user.
+fn avatar_color(name: &str, mine: bool) -> Retained<NSColor> {
+    if mine {
+        return theme::highlight();
+    }
+    let colors = [theme::link(), theme::live(), theme::accent(), theme::cyan()];
+    let hash = name.bytes().fold(0usize, |h, b| {
+        h.wrapping_mul(31).wrapping_add(usize::from(b))
+    });
+    colors[hash % colors.len()].clone()
 }
 
 /// Text in the private Claude panel: Markdown in the main ink color.

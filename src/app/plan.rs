@@ -4,7 +4,6 @@
 use meow::actions::Layout;
 use meow::conversations::ChatId;
 use meow::plan::DayPlan;
-use meow::tasks;
 
 use super::requests::RunKind;
 use super::{App, now_secs};
@@ -33,7 +32,7 @@ impl App {
         if let Some((plan, made_at)) = self.shown_plan() {
             self.chat
                 .plan()
-                .render(plan, made_at, &self.tasks, now_secs());
+                .render(plan, made_at, &self.tasks, &self.rsvp.sending(), now_secs());
         }
     }
 
@@ -55,12 +54,12 @@ impl App {
         let Some(item) = self.chat.plan().item_at(row) else {
             return;
         };
-        let Some(id) = tasks::id_for(&item) else {
-            return;
-        };
-        if self.tasks.get(&id).is_none() {
+        if self.tasks.find(&item).is_none() {
             self.tasks.merge(std::slice::from_ref(&item), now_secs());
         }
+        let Some(id) = self.tasks.find(&item).map(|task| task.id.clone()) else {
+            return;
+        };
         self.toggle_task_id(&id);
     }
 
@@ -73,13 +72,13 @@ impl App {
             open_url(url);
             return;
         }
-        let Some(id) = tasks::id_for(&item) else {
-            return;
-        };
-        if self.tasks.get(&id).is_none() {
+        if self.tasks.find(&item).is_none() {
             self.tasks.merge(std::slice::from_ref(&item), now_secs());
             self.tasks_changed();
         }
+        let Some(id) = self.tasks.find(&item).map(|task| task.id.clone()) else {
+            return;
+        };
         self.chat_about_task_id(&id);
     }
 

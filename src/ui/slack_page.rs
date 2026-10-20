@@ -6,7 +6,8 @@
 //! [`SlackPage::render_conversation`], and reads back the row index of a click
 //! ([`SlackPage::id_at`]) and the typed reply ([`SlackPage::take_input`]).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -19,7 +20,9 @@ use objc2_foundation::{
     NSAttributedString, NSMutableAttributedString, NSPoint, NSRange, NSRect, NSSize, NSString,
 };
 
+use super::bubble;
 use super::controller::Controller;
+use super::emoji_text::{self, EmojiGlyph, ImageGlyph};
 use super::flipped::FlippedView;
 use super::link_button::LinkButton;
 use super::rich_text::{self, Attributes};
@@ -30,16 +33,34 @@ use super::widgets;
 
 const MARGIN: f64 = 10.0;
 const INPUT_HEIGHT: f64 = 28.0;
-const SEND_WIDTH: f64 = 64.0;
-const ASK_WIDTH: f64 = 60.0;
+const LIVE_WIDTH: f64 = 80.0;
+const SEND_WIDTH: f64 = 76.0;
+const ASK_WIDTH: f64 = 64.0;
 const AUTO_WIDTH: f64 = 68.0;
 const AGENT_WIDTH: f64 = 76.0;
-const BACK_WIDTH: f64 = 96.0;
-const TOP_HEIGHT: f64 = 28.0;
+const BACK_WIDTH: f64 = 110.0;
+const TOP_HEIGHT: f64 = 40.0;
 const ROW_HEIGHT: f64 = 30.0;
 const INDENT: f64 = 6.0;
 /// Room on the right of a row for its mention count and time.
 const META_WIDTH: f64 = 120.0;
+/// Each conversation of the list sits on a square card.
+const CARD_HEIGHT: f64 = 44.0;
+const CARD_GAP: f64 = 6.0;
+const CARD_PADDING: f64 = 12.0;
+/// The Direct and Channels tabs above the list.
+const TAB_WIDTH: f64 = 150.0;
+const TAB_HEIGHT: f64 = 28.0;
+const TAB_GAP: f64 = 6.0;
+
+/// Which conversations the list shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SlackTab {
+    /// Direct and group messages.
+    #[default]
+    Direct,
+    Channels,
+}
 
 /// One conversation in the list.
 pub struct ConversationRow {
@@ -50,6 +71,8 @@ pub struct ConversationRow {
     pub mentions: u32,
     /// When it was last active ("14:32", "Mon"); may be empty.
     pub time: String,
+    /// A direct or group message, rather than a channel.
+    pub direct: bool,
 }
 
 /// A piece of the open conversation, names resolved and bodies in Markdown.
@@ -75,7 +98,7 @@ pub struct SlackPage {
     /// Message view and reply box (conversation mode).
     convo_scroll: Retained<NSScrollView>,
     transcript: Retained<NSTextView>,
-    input: Retained<NSTextField>,
+    input: Retained<widgets::GrowingField>,
     send: Retained<NSButton>,
     /// Asks Claude privately about the conversation, with the typed question.
     ask: Retained<NSButton>,
@@ -88,8 +111,13 @@ pub struct SlackPage {
     assist: AssistPanel,
     back: Retained<NSButton>,
     convo_title: Retained<NSTextField>,
+    /// The dark strip holding the back link, title and live mark.
+    strip: Retained<NSView>,
+    /// The reply bar of the conversation.
+    composer: Retained<NSView>,
     /// Conversation ids in the order shown; row buttons carry an index into it.
     shown_ids: RefCell<Vec<String>>,
+    tab: Cell<SlackTab>,
     target: Retained<Controller>,
     mtm: MainThreadMarker,
 }
@@ -101,11 +129,18 @@ impl SlackPage {
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
-        let (width, height) = (frame.size.width, frame.size.height);
+        // The page runs under the bubble's right padding; content keeps clear of it.
+        let (width, height) = (frame.size.width - bubble::PADDING, frame.size.height);
         let target: &AnyObject = controller;
 
         // --- Signed-out state ---------------------------------------------
-        let signin = widgets::text_button(mtm, "Sign in to Slack", target, sel!(signInSlack:));
+        let signin = widgets::text_button(
+            mtm,
+            "Sign in to Slack",
+            widgets::ButtonStyle::Primary,
+            target,
+            sel!(signInSlack:),
+        );
         signin.setFrame(rect(
             MARGIN,
             height / 2.0,
@@ -163,33 +198,64 @@ impl SlackPage {
         view.addSubview(&voice.view);
 
         // --- Conversation mode --------------------------------------------
-        let back = widgets::text_button(mtm, "‹ All chats", target, sel!(slackBack:));
-        back.setFrame(rect(MARGIN, height - TOP_HEIGHT, BACK_WIDTH, TOP_HEIGHT));
-        back.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
-        view.addSubview(&back);
+        // The strip and the reply bar live in a view of their own, so they
+        // hide with the conversation and can run on to the bubble's outline.
+        let composer =
+            NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, frame.size.width, height));
+        composer.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        view.addSubview(&composer);
+        // A dark strip on top: back link, who it is with, and the live mark.
+        let strip = NSView::initWithFrame(
+            NSView::alloc(mtm),
+            rect(0.0, height - TOP_HEIGHT, frame.size.width, TOP_HEIGHT),
+        );
+        strip.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMinYMargin,
+        );
+        widgets::paint(&strip, Some(&theme::sidebar()), None);
+        composer.addSubview(&strip);
+
+        let back = widgets::text_button(
+            mtm,
+            "‹ Messages",
+            widgets::ButtonStyle::Link,
+            target,
+            sel!(slackBack:),
+        );
+        back.setFrame(rect(INDENT, 0.0, BACK_WIDTH, TOP_HEIGHT));
+        strip.addSubview(&back);
 
         let convo_title = NSTextField::labelWithString(&NSString::from_str(""), mtm);
         convo_title.setFrame(rect(
-            MARGIN + BACK_WIDTH + INDENT,
-            height - TOP_HEIGHT,
-            width - 2.0 * MARGIN - BACK_WIDTH - INDENT,
-            TOP_HEIGHT,
+            INDENT + BACK_WIDTH,
+            (TOP_HEIGHT - 22.0) / 2.0,
+            width - 2.0 * INDENT - BACK_WIDTH - LIVE_WIDTH,
+            22.0,
         ));
-        convo_title.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMinYMargin,
+        convo_title.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+        strip.addSubview(&convo_title);
+
+        let live = NSTextField::labelWithAttributedString(
+            &rich_text::attributed(
+                "■ LIVE",
+                &Attributes::plain(theme::live(), theme::label_font(theme::LABEL_SIZE)),
+            ),
+            mtm,
         );
-        view.addSubview(&convo_title);
+        live.setAlignment(NSTextAlignment::Right);
+        live.setFrame(rect(
+            width - MARGIN - LIVE_WIDTH,
+            (TOP_HEIGHT - 18.0) / 2.0,
+            LIVE_WIDTH,
+            18.0,
+        ));
+        live.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+        strip.addSubview(&live);
 
         let input = widgets::text_field(mtm, "Reply, or ask Claude… (Esc: back)");
-        input.setFrame(rect(
-            MARGIN,
-            MARGIN,
-            width - 6.0 * MARGIN - SEND_WIDTH - ASK_WIDTH - AUTO_WIDTH - AGENT_WIDTH,
-            INPUT_HEIGHT,
-        ));
-        input.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMaxYMargin,
-        );
         // SAFETY: the controller lives as long as the app, so the weak target/delegate stay valid.
         unsafe {
             input.setTarget(Some(target));
@@ -202,73 +268,65 @@ impl SlackPage {
         if let Some(cell) = input.cell() {
             cell.setSendsActionOnEndEditing(false);
         }
-        view.addSubview(&input);
 
-        let send = widgets::text_button(mtm, "Send", target, sel!(sendSlack:));
-        send.setFrame(rect(
-            width - MARGIN - SEND_WIDTH,
-            MARGIN - 2.0,
-            SEND_WIDTH,
-            INPUT_HEIGHT + 4.0,
-        ));
-        send.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxYMargin,
+        let send = widgets::text_button(
+            mtm,
+            "Send",
+            widgets::ButtonStyle::Go,
+            target,
+            sel!(sendSlack:),
         );
-        view.addSubview(&send);
-
-        let ask = widgets::text_button(mtm, "Ask", target, sel!(askSlack:));
-        ask.setFrame(rect(
-            width - 2.0 * MARGIN - SEND_WIDTH - ASK_WIDTH,
-            MARGIN - 2.0,
-            ASK_WIDTH,
-            INPUT_HEIGHT + 4.0,
-        ));
-        ask.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxYMargin,
+        let ask = widgets::text_button(
+            mtm,
+            "Ask",
+            widgets::ButtonStyle::Accent,
+            target,
+            sel!(askSlack:),
         );
-        view.addSubview(&ask);
-
-        let auto = widgets::text_button(mtm, "Auto", target, sel!(autocompleteSlack:));
-        auto.setFrame(rect(
-            width - 3.0 * MARGIN - SEND_WIDTH - ASK_WIDTH - AUTO_WIDTH,
-            MARGIN - 2.0,
-            AUTO_WIDTH,
-            INPUT_HEIGHT + 4.0,
-        ));
-        auto.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxYMargin,
+        let auto = widgets::text_button(
+            mtm,
+            "Auto",
+            widgets::ButtonStyle::OutlineAccent,
+            target,
+            sel!(autocompleteSlack:),
         );
-        view.addSubview(&auto);
-
-        let agent = widgets::text_button(mtm, "Agent", target, sel!(agentSlack:));
+        let agent = widgets::text_button(
+            mtm,
+            "Agent",
+            widgets::ButtonStyle::OutlineLink,
+            target,
+            sel!(agentSlack:),
+        );
         agent.setToolTip(Some(&NSString::from_str(
             "Start a coding agent in Superset for this conversation",
         )));
-        agent.setFrame(rect(
-            width - 4.0 * MARGIN - SEND_WIDTH - ASK_WIDTH - AUTO_WIDTH - AGENT_WIDTH,
-            MARGIN - 2.0,
-            AGENT_WIDTH,
-            INPUT_HEIGHT + 4.0,
-        ));
-        agent.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxYMargin,
+        widgets::composer(
+            mtm,
+            &composer,
+            &input,
+            &[
+                (&ask, ASK_WIDTH, widgets::ButtonStyle::Accent),
+                (&auto, AUTO_WIDTH, widgets::ButtonStyle::OutlineAccent),
+                (&agent, AGENT_WIDTH, widgets::ButtonStyle::OutlineLink),
+            ],
+            &[(&send, SEND_WIDTH, widgets::ButtonStyle::Go)],
         );
-        view.addSubview(&agent);
 
         let assist = AssistPanel::new(
             mtm,
             controller,
             rect(
                 MARGIN,
-                2.0 * MARGIN + INPUT_HEIGHT,
+                widgets::STACKED_COMPOSER_HEIGHT + MARGIN,
                 width - 2.0 * MARGIN,
                 slack_assist::HEIGHT,
             ),
         );
         view.addSubview(&assist.view);
+        input.keep_above(&assist.view);
 
         let convo_scroll = NSTextView::scrollableTextView(mtm);
-        let top = 2.0 * MARGIN + INPUT_HEIGHT;
+        let top = widgets::STACKED_COMPOSER_HEIGHT + MARGIN;
         convo_scroll.setFrame(rect(
             MARGIN,
             top,
@@ -290,6 +348,7 @@ impl SlackPage {
         rich_text::style_links(&transcript);
         transcript.setDelegate(Some(ProtocolObject::from_ref(&**controller)));
         view.addSubview(&convo_scroll);
+        input.keep_clear(&convo_scroll);
 
         let page = Self {
             view,
@@ -308,7 +367,10 @@ impl SlackPage {
             assist,
             back,
             convo_title,
+            strip,
+            composer,
             shown_ids: RefCell::new(Vec::new()),
+            tab: Cell::new(SlackTab::Direct),
             target: controller.clone(),
             mtm,
         };
@@ -324,7 +386,7 @@ impl SlackPage {
 
     pub fn take_input(&self) -> String {
         let text = self.input.stringValue().to_string();
-        self.input.setStringValue(&NSString::from_str(""));
+        self.input.set_text("");
         text
     }
 
@@ -346,6 +408,7 @@ impl SlackPage {
             editor.setString(&text);
             editor.setSelectedRange(NSRange::new(text.length(), 0));
         }
+        self.input.fit();
     }
 
     /// Updates the "write like me" controls above the list.
@@ -372,16 +435,20 @@ impl SlackPage {
     /// panel, when it is shown).
     fn layout_transcript(&self) {
         let size = self.view.bounds().size;
-        let mut bottom = 2.0 * MARGIN + INPUT_HEIGHT;
+        let mut bottom = widgets::STACKED_COMPOSER_HEIGHT + self.input.extra_height() + MARGIN;
         if self.assist.is_shown() {
             bottom += slack_assist::HEIGHT + MARGIN;
         }
         self.convo_scroll.setFrame(rect(
             MARGIN,
             bottom,
-            size.width - 2.0 * MARGIN,
+            size.width - 2.0 * MARGIN - bubble::PADDING,
             (size.height - bottom - TOP_HEIGHT).max(0.0),
         ));
+    }
+
+    pub fn set_tab(&self, tab: SlackTab) {
+        self.tab.set(tab);
     }
 
     /// The conversation id of row `index`, as last listed.
@@ -420,24 +487,40 @@ impl SlackPage {
         for row in self.list.subviews().iter() {
             row.removeFromSuperview();
         }
+        let tab = self.tab.get();
+        let in_tab = |row: &&ConversationRow| row.direct == (tab == SlackTab::Direct);
+        let unread = |direct: bool| {
+            rows.iter()
+                .filter(|r| r.direct == direct && r.unread)
+                .count()
+        };
+        self.add_tabs(unread(true), unread(false), width);
+        let shown: Vec<&ConversationRow> = rows.iter().filter(in_tab).collect();
         let mut ids = Vec::new();
-        let mut y = 0.0;
-        if rows.is_empty() {
-            self.add_placeholder(width);
-            y = ROW_HEIGHT;
+        let mut y = TAB_HEIGHT + CARD_GAP;
+        if shown.is_empty() {
+            self.add_placeholder(width, y);
+            y += ROW_HEIGHT;
         }
-        for row in rows {
+        for row in shown {
             self.add_row(ids.len(), row, width, y);
             ids.push(row.id.clone());
-            y += ROW_HEIGHT;
+            y += CARD_HEIGHT + CARD_GAP;
         }
         let height = y.max(self.list_scroll.contentSize().height);
         self.list.setFrameSize(NSSize::new(width, height));
         self.shown_ids.replace(ids);
     }
 
-    /// Shows one conversation's messages and the reply box.
-    pub fn render_conversation(&self, title: &str, items: &[TranscriptItem]) {
+    /// Shows one conversation's messages and the reply box; `:name:` found in
+    /// `emoji` is drawn as that custom emoji, and attached images from `images`.
+    pub fn render_conversation(
+        &self,
+        title: &str,
+        items: &[TranscriptItem],
+        emoji: &HashMap<String, EmojiGlyph>,
+        images: &HashMap<String, ImageGlyph>,
+    ) {
         self.signin.setHidden(true);
         self.status.setHidden(true);
         self.list_scroll.setHidden(true);
@@ -465,6 +548,8 @@ impl SlackPage {
             };
             text.appendAttributedString(&piece);
         }
+        emoji_text::insert(&text, emoji);
+        emoji_text::insert_images(&text, images);
         // SAFETY: the text view always owns a text storage.
         if let Some(storage) = unsafe { self.transcript.textStorage() } {
             storage.setAttributedString(&text);
@@ -486,42 +571,99 @@ impl SlackPage {
         }
         self.back.setHidden(hidden);
         self.convo_title.setHidden(hidden);
+        self.strip.setHidden(hidden);
+        self.composer.setHidden(hidden);
     }
 
-    fn add_placeholder(&self, width: f64) {
+    /// "Direct · 3" and "Channels · 5": the open tab filled, each with how
+    /// many of its conversations have unread messages.
+    fn add_tabs(&self, direct_unread: usize, channels_unread: usize, width: f64) {
+        let target: &AnyObject = &self.target;
+        let tabs = [
+            (
+                SlackTab::Direct,
+                "Direct",
+                direct_unread,
+                sel!(showSlackDirect:),
+            ),
+            (
+                SlackTab::Channels,
+                "Channels",
+                channels_unread,
+                sel!(showSlackChannels:),
+            ),
+        ];
+        let tab_width = TAB_WIDTH.min((width - TAB_GAP) / 2.0);
+        for (n, (tab, name, unread, action)) in tabs.into_iter().enumerate() {
+            let label = match unread {
+                0 => name.to_string(),
+                n => format!("{name} · {n}"),
+            };
+            let style = if self.tab.get() == tab {
+                widgets::ButtonStyle::Primary
+            } else {
+                widgets::ButtonStyle::Quiet
+            };
+            let button = widgets::text_button(self.mtm, &label, style, target, action);
+            button.setToolTip(Some(&NSString::from_str(&format!(
+                "{name}: {unread} with unread messages"
+            ))));
+            button.setFrame(rect(
+                n as f64 * (tab_width + TAB_GAP),
+                0.0,
+                tab_width,
+                TAB_HEIGHT,
+            ));
+            self.list.addSubview(&button);
+        }
+    }
+
+    fn add_placeholder(&self, width: f64, y: f64) {
+        let text = match self.tab.get() {
+            SlackTab::Direct => "No direct messages yet.",
+            SlackTab::Channels => "No channels yet.",
+        };
         let label = NSTextField::labelWithAttributedString(
             &rich_text::attributed(
-                "No direct messages yet.",
+                text,
                 &Attributes::plain(theme::muted(), theme::font(theme::BODY_SIZE)),
             ),
             self.mtm,
         );
-        label.setFrame(rect(INDENT, 4.0, width - 2.0 * INDENT, ROW_HEIGHT));
+        label.setFrame(rect(INDENT, y + 4.0, width - 2.0 * INDENT, ROW_HEIGHT));
         self.list.addSubview(&label);
     }
 
-    /// A clickable conversation name, with a dot when it has unread messages,
-    /// and its mention count and last activity on the right.
+    /// A card holding the conversation name (clickable), a green square when
+    /// it has unread messages, and its mention count and last activity on the right.
     fn add_row(&self, index: usize, row: &ConversationRow, width: f64, y: f64) {
         let target: &AnyObject = &self.target;
-        let marker = if row.unread { "● " } else { "   " };
-        let label = format!("{marker}{}", row.title);
+        let card = FlippedView::new(self.mtm, rect(0.0, y, width, CARD_HEIGHT));
+        card.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+        widgets::paint(&card, Some(&theme::card()), None);
+        self.list.addSubview(&card);
+
         let button = LinkButton::new(
             self.mtm,
-            rect(INDENT, y, width - 2.0 * INDENT - META_WIDTH, ROW_HEIGHT),
-            row_title(&label, row.unread, false),
-            row_title(&label, row.unread, true),
+            rect(
+                CARD_PADDING,
+                0.0,
+                width - 2.0 * CARD_PADDING - META_WIDTH,
+                CARD_HEIGHT,
+            ),
+            row_title(&row.title, row.unread, false),
+            row_title(&row.title, row.unread, true),
             target,
             sel!(openSlack:),
         );
         button.setTag(index as isize);
         button.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
-        self.list.addSubview(&button);
-        self.add_meta(row, width, y);
+        card.addSubview(&button);
+        self.add_meta(&card, row, width);
     }
 
-    /// The right-aligned "@2  14:32" of a row.
-    fn add_meta(&self, row: &ConversationRow, width: f64, y: f64) {
+    /// The right-aligned "@2  14:32" of a row, inside its `card`.
+    fn add_meta(&self, card: &NSView, row: &ConversationRow, width: f64) {
         let meta = NSMutableAttributedString::new();
         if row.mentions > 0 {
             meta.appendAttributedString(&rich_text::attributed(
@@ -540,18 +682,30 @@ impl SlackPage {
         label.setAlignment(NSTextAlignment::Right);
         let height = label.fittingSize().height;
         label.setFrame(rect(
-            width - INDENT - META_WIDTH,
-            y + (ROW_HEIGHT - height) / 2.0,
+            width - CARD_PADDING - META_WIDTH,
+            (CARD_HEIGHT - height) / 2.0,
             META_WIDTH,
             height,
         ));
         label.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
-        self.list.addSubview(&label);
+        card.addSubview(&label);
     }
 }
 
-/// A conversation name; bold for unread, accent-underlined on hover.
-fn row_title(text: &str, unread: bool, hover: bool) -> Retained<NSAttributedString> {
+/// A conversation name after a green square when unread; bold for unread,
+/// accent-underlined on hover.
+fn row_title(name: &str, unread: bool, hover: bool) -> Retained<NSAttributedString> {
+    let mark = rich_text::attributed(
+        if unread { "■  " } else { "   " },
+        &Attributes::plain(theme::live(), theme::font(theme::BODY_SIZE)),
+    );
+    let text = NSMutableAttributedString::new();
+    text.appendAttributedString(&mark);
+    text.appendAttributedString(&row_name(name, unread, hover));
+    text.into_super()
+}
+
+fn row_name(text: &str, unread: bool, hover: bool) -> Retained<NSAttributedString> {
     let color = if hover {
         theme::accent()
     } else if unread {

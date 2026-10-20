@@ -12,11 +12,12 @@ use super::rich_text::{self, Attributes};
 use super::theme;
 use super::widgets;
 
-pub const HEIGHT: f64 = 52.0;
+pub const HEIGHT: f64 = 44.0;
 const BUTTON_HEIGHT: f64 = 28.0;
-const TOGGLE_WIDTH: f64 = 196.0;
-const LEARN_WIDTH: f64 = 156.0;
-const GAP: f64 = 8.0;
+const TOGGLE_WIDTH: f64 = 178.0;
+const LEARN_WIDTH: f64 = 120.0;
+const GAP: f64 = 10.0;
+const PADDING: f64 = 8.0;
 
 /// What the bar shows.
 pub struct VoiceBarState<'a> {
@@ -44,18 +45,45 @@ impl VoiceBar {
             NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMinYMargin,
         );
         let target: &AnyObject = controller;
-        let top = frame.size.height - BUTTON_HEIGHT;
+        // A card of its own, controls on one row: toggle, status, then relearn.
+        widgets::paint(&view, Some(&theme::card()), None);
+        let top = (frame.size.height - BUTTON_HEIGHT) / 2.0;
+        let width = frame.size.width;
 
-        let toggle = widgets::text_button(mtm, "Write as me: off", target, sel!(toggleWriteAsMe:));
-        toggle.setFrame(rect(0.0, top, TOGGLE_WIDTH, BUTTON_HEIGHT));
+        let toggle = widgets::text_button(
+            mtm,
+            "□ Write like me",
+            widgets::ButtonStyle::Quiet,
+            target,
+            sel!(toggleWriteAsMe:),
+        );
+        toggle.setFrame(rect(PADDING, top, TOGGLE_WIDTH, BUTTON_HEIGHT));
         view.addSubview(&toggle);
 
-        let learn = widgets::text_button(mtm, "Learn my style", target, sel!(learnMyStyle:));
-        learn.setFrame(rect(TOGGLE_WIDTH + GAP, top, LEARN_WIDTH, BUTTON_HEIGHT));
+        let learn = widgets::text_button(
+            mtm,
+            "Learn",
+            widgets::ButtonStyle::Quiet,
+            target,
+            sel!(learnMyStyle:),
+        );
+        learn.setFrame(rect(
+            width - PADDING - LEARN_WIDTH,
+            top,
+            LEARN_WIDTH,
+            BUTTON_HEIGHT,
+        ));
+        learn.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
         view.addSubview(&learn);
 
         let status = NSTextField::labelWithString(&NSString::from_str(""), mtm);
-        status.setFrame(rect(4.0, 0.0, frame.size.width - 4.0, top));
+        let status_x = PADDING + TOGGLE_WIDTH + GAP;
+        status.setFrame(rect(
+            status_x,
+            (frame.size.height - 18.0) / 2.0,
+            width - status_x - GAP - LEARN_WIDTH - PADDING,
+            18.0,
+        ));
         status.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
         view.addSubview(&status);
 
@@ -68,18 +96,15 @@ impl VoiceBar {
     }
 
     pub fn render(&self, state: &VoiceBarState) {
-        let toggle = if state.enabled {
-            "Write as me: on"
+        // Green while on, like a lit switch.
+        let (toggle, style) = if state.enabled {
+            ("■ Write like me", widgets::ButtonStyle::Go)
         } else {
-            "Write as me: off"
+            ("□ Write like me", widgets::ButtonStyle::Quiet)
         };
-        widgets::set_text_button_label(&self.toggle, toggle);
-        let learn = if state.learned {
-            "Relearn style"
-        } else {
-            "Learn my style"
-        };
-        widgets::set_text_button_label(&self.learn, learn);
+        widgets::restyle_button(&self.toggle, toggle, style);
+        let learn = if state.learned { "Relearn" } else { "Learn" };
+        widgets::set_text_button_label(&self.learn, learn, widgets::ButtonStyle::Quiet);
         self.learn.setEnabled(!state.busy);
         self.status.setAttributedStringValue(&rich_text::attributed(
             state.status,

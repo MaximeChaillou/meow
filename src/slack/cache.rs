@@ -187,6 +187,7 @@ mod tests {
             thread_ts: None,
             reply_count: 0,
             files: Vec::new(),
+            images: Vec::new(),
             attachment: None,
             bot_name: None,
         }

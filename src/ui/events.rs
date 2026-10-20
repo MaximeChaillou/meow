@@ -37,6 +37,8 @@ pub enum UiEvent {
     AddTask,
     /// Row index in the task window, as last rendered.
     ToggleTask(usize),
+    /// Show or hide the completed tasks.
+    ToggleCompleted,
     OpenTask(usize),
     /// Open the conversation about the task in this row.
     ChatAboutTask(usize),
@@ -47,13 +49,29 @@ pub enum UiEvent {
     OpenPlanItem(usize),
     /// Agenda link index on the plan page.
     OpenPlanLink(usize),
+    /// Accept or decline the invitation of this agenda event on the plan page.
+    AcceptPlanEvent(usize),
+    DeclinePlanEvent(usize),
     ToggleChat,
+    /// Open the Activity page.
+    ShowActivity,
+    /// Open what the activity item in this row is about.
+    OpenActivity(usize),
+    /// Dismiss the activity item in this row.
+    DismissActivity(usize),
+    ClearActivity,
+    /// Open the Scheduled page.
+    ShowRoutines,
+    /// Delete the scheduled task in this row.
+    DeleteRoutine(usize),
     /// Open the Slack page.
     ShowSlack,
     /// Start the Slack sign-in flow.
     SignInSlack,
     /// Open the Slack conversation in this row, as last listed.
     OpenSlackConversation(usize),
+    /// Show the Slack list's tab of direct messages, or of channels.
+    SlackTab(crate::ui::slack_page::SlackTab),
     /// Go back from a Slack conversation to the list.
     SlackBack,
     /// Send the reply typed in the open Slack conversation.

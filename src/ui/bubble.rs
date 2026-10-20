@@ -18,7 +18,7 @@ const SHADOW: f64 = 2.0 * PIXEL;
 const TAIL_ROWS: usize = 4;
 const TAIL_HEIGHT: f64 = TAIL_ROWS as f64 * PIXEL;
 /// Gap between the outline and the content.
-const PADDING: f64 = 2.0 * PIXEL;
+pub const PADDING: f64 = 2.0 * PIXEL;
 
 define_class!(
     /// Borderless panel that can still take keyboard focus for the inputs.
@@ -113,8 +113,8 @@ impl BubbleView {
 
         fill(&stepped(shadow), &theme::shadow());
         fill(&tail_outline(shadow, tail_x + SHADOW), &theme::shadow());
-        fill(&stepped(body), &theme::ink());
-        fill(&tail_outline(body, tail_x), &theme::ink());
+        fill(&stepped(body), &theme::outline());
+        fill(&tail_outline(body, tail_x), &theme::outline());
         fill(&stepped(inset(body, PIXEL)), &theme::paper());
         self.draw_sidebar(body);
         fill(&tail_inside(body, tail_x), &theme::paper());

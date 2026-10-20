@@ -37,6 +37,7 @@ impl App {
             ..self.settings.clone()
         };
         menus::mark_coat(&self.coat_menu, coat);
+        self.chat.set_coat(coat);
         // Redraw now, even if the cat holds still.
         self.last_look = None;
         let Some(path) = &self.settings_path else {

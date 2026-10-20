@@ -77,7 +77,7 @@ impl App {
     /// Prunes, saves and redraws the task list, and the plan whose items are tasks.
     pub(super) fn tasks_changed(&mut self) {
         self.tasks.prune(now_secs());
-        self.chat.render_tasks(&self.tasks);
+        self.chat.render_tasks(&self.tasks, now_secs());
         self.render_plan();
         let Some(path) = &self.tasks_path else { return };
         if let Err(error) = self.tasks.save(path) {

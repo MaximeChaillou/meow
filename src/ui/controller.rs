@@ -4,8 +4,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, NSObject, NSObjectProtocol, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSControl, NSControlTextEditingDelegate, NSTextDelegate, NSTextFieldDelegate, NSTextView,
-    NSTextViewDelegate, NSWindowDelegate,
+    NSControl, NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags, NSTextDelegate,
+    NSTextFieldDelegate, NSTextView, NSTextViewDelegate, NSWindowDelegate,
 };
 use objc2_foundation::{NSNotification, NSString};
 
@@ -86,6 +86,16 @@ define_class!(
         }
 
         /// Slack conversation rows: the sender's tag is the row index.
+        #[unsafe(method(showSlackDirect:))]
+        fn show_slack_direct(&self, _sender: Option<&AnyObject>) {
+            push(UiEvent::SlackTab(super::slack_page::SlackTab::Direct));
+        }
+
+        #[unsafe(method(showSlackChannels:))]
+        fn show_slack_channels(&self, _sender: Option<&AnyObject>) {
+            push(UiEvent::SlackTab(super::slack_page::SlackTab::Channels));
+        }
+
         #[unsafe(method(openSlack:))]
         fn open_slack(&self, sender: Option<&AnyObject>) {
             if let Some(row) = sender_tag(sender) {
@@ -161,6 +171,11 @@ define_class!(
             }
         }
 
+        #[unsafe(method(toggleCompleted:))]
+        fn toggle_completed(&self, _sender: Option<&AnyObject>) {
+            push(UiEvent::ToggleCompleted);
+        }
+
         #[unsafe(method(chatAboutTask:))]
         fn chat_about_task(&self, sender: Option<&AnyObject>) {
             if let Some(row) = sender_tag(sender) {
@@ -202,6 +217,56 @@ define_class!(
             }
         }
 
+        #[unsafe(method(showActivity:))]
+        fn show_activity(&self, _sender: Option<&AnyObject>) {
+            push(UiEvent::ShowActivity);
+        }
+
+        #[unsafe(method(openActivity:))]
+        fn open_activity(&self, sender: Option<&AnyObject>) {
+            if let Some(row) = sender_tag(sender) {
+                push(UiEvent::OpenActivity(row));
+            }
+        }
+
+        #[unsafe(method(dismissActivity:))]
+        fn dismiss_activity(&self, sender: Option<&AnyObject>) {
+            if let Some(row) = sender_tag(sender) {
+                push(UiEvent::DismissActivity(row));
+            }
+        }
+
+        #[unsafe(method(clearActivity:))]
+        fn clear_activity(&self, _sender: Option<&AnyObject>) {
+            push(UiEvent::ClearActivity);
+        }
+
+        #[unsafe(method(showRoutines:))]
+        fn show_routines(&self, _sender: Option<&AnyObject>) {
+            push(UiEvent::ShowRoutines);
+        }
+
+        #[unsafe(method(deleteRoutine:))]
+        fn delete_routine(&self, sender: Option<&AnyObject>) {
+            if let Some(row) = sender_tag(sender) {
+                push(UiEvent::DeleteRoutine(row));
+            }
+        }
+
+        #[unsafe(method(acceptPlanEvent:))]
+        fn accept_plan_event(&self, sender: Option<&AnyObject>) {
+            if let Some(index) = sender_tag(sender) {
+                push(UiEvent::AcceptPlanEvent(index));
+            }
+        }
+
+        #[unsafe(method(declinePlanEvent:))]
+        fn decline_plan_event(&self, sender: Option<&AnyObject>) {
+            if let Some(index) = sender_tag(sender) {
+                push(UiEvent::DeclinePlanEvent(index));
+            }
+        }
+
         #[unsafe(method(runAction:))]
         fn run_action(&self, _sender: Option<&AnyObject>) {
             push(UiEvent::RunAction);
@@ -220,6 +285,16 @@ define_class!(
         fn do_command(&self, _control: &NSControl, _view: &NSTextView, command: Sel) -> Bool {
             if command == sel!(cancelOperation:) {
                 push(UiEvent::Escape);
+                return Bool::YES;
+            }
+            // ⇧ Return adds a line break, like ⌥ Return; plain Return sends.
+            if command == sel!(insertNewline:)
+                && NSEvent::modifierFlags_class().contains(NSEventModifierFlags::Shift)
+            {
+                // SAFETY: the field editor is a live text view; no sender is needed.
+                let _: () = unsafe {
+                    msg_send![_view, insertNewlineIgnoringFieldEditor: None::<&AnyObject>]
+                };
                 return Bool::YES;
             }
             Bool::NO

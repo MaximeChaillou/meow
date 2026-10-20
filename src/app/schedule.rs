@@ -1,4 +1,4 @@
-//! Daily quick actions (Morning planning at 7:00): each runs on its own once a
+//! Daily quick actions (Today's planning at 7:00): each runs on its own once a
 //! day, at its time or as soon as Meow is running after it (Mac asleep, logged
 //! in late…). The run happens in the background; the cat shows `!` when done.
 

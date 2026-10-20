@@ -23,6 +23,10 @@ const CREATE_WIDTH: f64 = 176.0;
 const START_WIDTH: f64 = 156.0;
 const CLOSE_WIDTH: f64 = 84.0;
 const GAP: f64 = 6.0;
+/// Width of the gold frame.
+const FRAME: f64 = 3.0;
+/// Space inside the frame.
+const INSET: f64 = FRAME + 10.0;
 /// The latest steps of a research run that stay listed while it works.
 const MAX_STEPS_SHOWN: usize = 6;
 
@@ -89,36 +93,71 @@ impl AssistPanel {
         );
         let width = frame.size.width;
         let target: &AnyObject = controller;
+        // A gold pixel frame: this is Claude talking to the user alone.
+        widgets::paint(
+            &view,
+            Some(&theme::sidebar()),
+            Some((&theme::highlight(), FRAME)),
+        );
 
-        let close = widgets::text_button(mtm, "Close", target, sel!(closeSlackAssist:));
-        close.setFrame(rect(width - CLOSE_WIDTH, 0.0, CLOSE_WIDTH, BUTTON_HEIGHT));
+        let close = widgets::text_button(
+            mtm,
+            "Close",
+            widgets::ButtonStyle::Quiet,
+            target,
+            sel!(closeSlackAssist:),
+        );
+        close.setFrame(rect(
+            width - INSET - CLOSE_WIDTH,
+            INSET,
+            CLOSE_WIDTH,
+            BUTTON_HEIGHT,
+        ));
         close.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
         view.addSubview(&close);
 
-        let use_draft = widgets::text_button(mtm, "Use draft", target, sel!(useSlackDraft:));
+        let use_draft = widgets::text_button(
+            mtm,
+            "Use draft",
+            widgets::ButtonStyle::Primary,
+            target,
+            sel!(useSlackDraft:),
+        );
         use_draft.setFrame(rect(
-            width - CLOSE_WIDTH - GAP - USE_WIDTH,
-            0.0,
+            width - INSET - CLOSE_WIDTH - GAP - USE_WIDTH,
+            INSET,
             USE_WIDTH,
             BUTTON_HEIGHT,
         ));
         use_draft.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
         view.addSubview(&use_draft);
 
-        let create = widgets::text_button(mtm, "Create event", target, sel!(createSlackEvent:));
+        let create = widgets::text_button(
+            mtm,
+            "Create event",
+            widgets::ButtonStyle::Go,
+            target,
+            sel!(createSlackEvent:),
+        );
         create.setFrame(rect(
-            width - CLOSE_WIDTH - GAP - CREATE_WIDTH,
-            0.0,
+            width - INSET - CLOSE_WIDTH - GAP - CREATE_WIDTH,
+            INSET,
             CREATE_WIDTH,
             BUTTON_HEIGHT,
         ));
         create.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
         view.addSubview(&create);
 
-        let start_agent = widgets::text_button(mtm, "Start agent", target, sel!(startSlackAgent:));
+        let start_agent = widgets::text_button(
+            mtm,
+            "Start agent",
+            widgets::ButtonStyle::Go,
+            target,
+            sel!(startSlackAgent:),
+        );
         start_agent.setFrame(rect(
-            width - CLOSE_WIDTH - GAP - START_WIDTH,
-            0.0,
+            width - INSET - CLOSE_WIDTH - GAP - START_WIDTH,
+            INSET,
             START_WIDTH,
             BUTTON_HEIGHT,
         ));
@@ -127,10 +166,10 @@ impl AssistPanel {
 
         let scroll: Retained<NSScrollView> = NSTextView::scrollableTextView(mtm);
         scroll.setFrame(rect(
-            0.0,
-            BUTTON_HEIGHT + GAP,
-            width,
-            frame.size.height - BUTTON_HEIGHT - GAP,
+            FRAME,
+            INSET + BUTTON_HEIGHT + GAP,
+            width - 2.0 * FRAME,
+            frame.size.height - INSET - BUTTON_HEIGHT - GAP - FRAME,
         ));
         scroll.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
@@ -142,9 +181,8 @@ impl AssistPanel {
             .and_then(|view| view.downcast::<NSTextView>().ok())
             .expect("scrollable text view contains a text view");
         text.setEditable(false);
-        text.setDrawsBackground(true);
-        text.setBackgroundColor(&theme::code_background());
-        text.setTextContainerInset(NSSize::new(8.0, 8.0));
+        text.setDrawsBackground(false);
+        text.setTextContainerInset(NSSize::new(INSET, INSET));
         rich_text::style_links(&text);
         text.setDelegate(Some(ProtocolObject::from_ref(&**controller)));
         view.addSubview(&scroll);
@@ -176,7 +214,10 @@ impl AssistPanel {
                 &Attributes::plain(theme::muted(), theme::font(theme::SMALL_SIZE)),
             )
         };
-        text.appendAttributedString(&small("✦ Claude · only you see this\n"));
+        text.appendAttributedString(&rich_text::attributed(
+            "PRIVATE · NOTHING IS POSTED\n",
+            &Attributes::plain(theme::highlight(), theme::label_font(theme::LABEL_SIZE)),
+        ));
         let mut can_create = false;
         let mut can_start = false;
         let has_draft = match content {
@@ -185,7 +226,7 @@ impl AssistPanel {
                 label,
                 steps,
             } => {
-                text.appendAttributedString(&small(&format!("> {question}\n\n")));
+                text.appendAttributedString(&small(&format!("You: « {question} »\n\n")));
                 text.appendAttributedString(&small(&format!("{label}\n")));
                 let shown = steps.len().saturating_sub(MAX_STEPS_SHOWN);
                 for step in &steps[shown..] {
@@ -198,15 +239,12 @@ impl AssistPanel {
                 answer,
                 draft,
             } => {
-                text.appendAttributedString(&small(&format!("> {question}\n\n")));
+                text.appendAttributedString(&small(&format!("You: « {question} »\n\n")));
                 text.appendAttributedString(&rich_text::slack_assist_body(answer));
                 if let Some(draft) = draft {
                     text.appendAttributedString(&rich_text::attributed(
-                        "\nDraft\n",
-                        &Attributes {
-                            heavy: true,
-                            ..Attributes::plain(theme::accent(), theme::font(theme::SMALL_SIZE))
-                        },
+                        "\nDRAFT\n",
+                        &Attributes::plain(theme::muted(), theme::label_font(theme::LABEL_SIZE)),
                     ));
                     // The draft is Slack `mrkdwn`, as it will be sent.
                     let shown = format::to_markdown(draft, &NameMap::default());
@@ -215,7 +253,7 @@ impl AssistPanel {
                 draft.is_some()
             }
             AssistView::Failed { question, error } => {
-                text.appendAttributedString(&small(&format!("> {question}\n\n")));
+                text.appendAttributedString(&small(&format!("You: « {question} »\n\n")));
                 text.appendAttributedString(&rich_text::attributed(
                     error,
                     &Attributes::plain(theme::error(), theme::font(theme::BODY_SIZE)),
@@ -230,7 +268,7 @@ impl AssistPanel {
                 attendees,
                 creating,
             } => {
-                text.appendAttributedString(&small(&format!("> {question}\n\n")));
+                text.appendAttributedString(&small(&format!("You: « {question} »\n\n")));
                 if !note.is_empty() {
                     text.appendAttributedString(&small(&format!("{note}\n\n")));
                 }
@@ -262,7 +300,7 @@ impl AssistPanel {
                 project,
                 prompt,
             } => {
-                text.appendAttributedString(&small(&format!("> {question}\n\n")));
+                text.appendAttributedString(&small(&format!("You: « {question} »\n\n")));
                 if !note.is_empty() {
                     text.appendAttributedString(&small(&format!("{note}\n\n")));
                 }
@@ -282,7 +320,7 @@ impl AssistPanel {
                 status,
                 message,
             } => {
-                text.appendAttributedString(&small(&format!("> {question}\n\n")));
+                text.appendAttributedString(&small(&format!("You: « {question} »\n\n")));
                 text.appendAttributedString(&heading(&format!("Agent · {title}\n")));
                 for step in steps.iter() {
                     text.appendAttributedString(&small(&format!("    - {step}\n")));

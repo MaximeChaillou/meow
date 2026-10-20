@@ -11,6 +11,7 @@ pub mod auth;
 pub mod cache;
 pub mod calendar;
 pub mod client;
+pub mod emoji;
 pub mod format;
 pub mod http;
 pub mod keychain;

@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 /// Info string of the fenced block Claude uses to report tasks.
 pub const TASKS_FENCE: &str = "meow-tasks";
-/// Done tasks disappear this long after being checked.
-pub const DONE_TTL_SECS: u64 = 24 * 60 * 60;
+/// Done tasks stay in the completed list this long after being checked.
+pub const DONE_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 const MAX_FOUND: usize = 50;
 const MAX_TITLE_CHARS: usize = 200;
 const MANUAL_SOURCE: &str = "Me";
@@ -79,9 +79,9 @@ impl TaskList {
             .collect()
     }
 
-    /// Tasks grouped by source. Groups keep the order their source first
-    /// appeared in, so ticking a task never reshuffles them; sources with
-    /// nothing left open go last. Done tasks sit at the end of their group.
+    /// Open tasks grouped by source. Groups keep the order their source first
+    /// appeared in, so ticking a task never reshuffles them; done tasks are
+    /// left out (see [`TaskList::completed`]).
     pub fn groups(&self) -> Vec<TaskGroup<'_>> {
         let mut groups: Vec<TaskGroup> = Vec::new();
         for task in &self.tasks {
@@ -92,13 +92,18 @@ impl TaskList {
                 });
             }
         }
-        for task in self.display() {
+        for task in self.tasks.iter().filter(|t| !t.is_done()) {
             if let Some(group) = groups.iter_mut().find(|g| g.source == task.source) {
                 group.tasks.push(task);
             }
         }
-        groups.sort_by_key(|g| g.open_count() == 0);
+        groups.retain(|g| !g.tasks.is_empty());
         groups
+    }
+
+    /// Done tasks, most recently done first.
+    pub fn completed(&self) -> Vec<&Task> {
+        self.display().into_iter().filter(|t| t.is_done()).collect()
     }
 
     pub fn open_count(&self) -> usize {
@@ -136,8 +141,14 @@ impl TaskList {
             let source = clean_source(item.source.as_deref());
             let url = clean_url(item.url.as_deref());
             let id = task_key(&source, &title, url);
-            match self.tasks.iter_mut().find(|t| t.id == id) {
-                Some(existing) => existing.title = title,
+            let probe = FoundTask {
+                title: title.clone(),
+                source: Some(source.clone()),
+                url: url.map(str::to_string),
+            };
+            // A task already listed, even done, keeps its state.
+            match self.position(&probe) {
+                Some(index) => self.tasks[index].title = title,
                 None => {
                     self.tasks.push(Task {
                         id,
@@ -187,11 +198,38 @@ impl TaskList {
         }
     }
 
+    /// The listed task `found` is about: same id, same link (ignoring its
+    /// query, so a Slack thread link matches its message link), or same
+    /// source and title.
+    pub fn find(&self, found: &FoundTask) -> Option<&Task> {
+        self.position(found).map(|index| &self.tasks[index])
+    }
+
+    fn position(&self, found: &FoundTask) -> Option<usize> {
+        let id = id_for(found)?;
+        let link = clean_url(found.url.as_deref()).map(link_key);
+        let title = clean_title(&found.title)?.to_lowercase();
+        let source = clean_source(found.source.as_deref()).to_lowercase();
+        self.tasks.iter().position(|t| t.id == id).or_else(|| {
+            self.tasks
+                .iter()
+                .position(|t| match (&link, t.url.as_deref()) {
+                    (Some(link), Some(url)) => *link == link_key(url),
+                    _ => t.source.to_lowercase() == source && t.title.to_lowercase() == title,
+                })
+        })
+    }
+
+    /// Tasks done lately, most recent first, so a check does not report them again.
+    pub fn recently_done(&self, limit: usize) -> Vec<&Task> {
+        self.completed().into_iter().take(limit).collect()
+    }
+
     pub fn get(&self, id: &str) -> Option<&Task> {
         self.tasks.iter().find(|t| t.id == id)
     }
 
-    /// Forgets tasks that were done more than a day ago.
+    /// Forgets tasks that were done more than [`DONE_TTL_SECS`] ago.
     pub fn prune(&mut self, now: u64) {
         self.tasks.retain(|t| {
             t.done_at
@@ -241,6 +279,13 @@ fn task_key(source: &str, title: &str, url: Option<&str>) -> String {
         Some(url) => format!("url:{url}"),
         None => format!("{}:{}", source.to_lowercase(), title.to_lowercase()),
     }
+}
+
+/// A link without its query, fragment or trailing slash: the same message,
+/// issue or pull request however it was linked.
+fn link_key(url: &str) -> String {
+    let base = url.split(['?', '#']).next().unwrap_or(url);
+    base.trim_end_matches('/').to_lowercase()
 }
 
 fn clean_title(title: &str) -> Option<String> {
@@ -443,7 +488,7 @@ mod tests {
         assert_eq!(
             group_summary(&list),
             [
-                ("GitHub".into(), vec!["PR 2".into(), "PR 1".into()], 1),
+                ("GitHub".into(), vec!["PR 2".into()], 1),
                 ("Slack".into(), vec!["Maher".into()], 1),
                 ("Me".into(), vec!["Milk".into()], 1),
             ]
@@ -451,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn sources_with_only_done_tasks_come_last() {
+    fn done_tasks_leave_their_group_for_the_completed_list() {
         let mut list = TaskList::default();
         list.merge(
             &[
@@ -463,8 +508,13 @@ mod tests {
         let pr = list.groups()[0].tasks[0].id.clone();
         list.set_done(&pr, true, 2);
         let sources: Vec<_> = list.groups().iter().map(|g| g.source.to_string()).collect();
-        assert_eq!(sources, ["Slack", "GitHub"]);
-        assert_eq!(list.groups()[1].open_count(), 0);
+        assert_eq!(sources, ["Slack"]);
+        let maher = list.groups()[0].tasks[0].id.clone();
+        list.set_done(&maher, true, 3);
+        assert!(list.groups().is_empty());
+        let done: Vec<_> = list.completed().iter().map(|t| t.title.clone()).collect();
+        assert_eq!(done, ["Maher", "PR"], "most recently done first");
+        assert_eq!(list.completed()[1].done_at, Some(2));
     }
 
     #[test]
@@ -554,6 +604,30 @@ mod tests {
     }
 
     #[test]
+    fn a_done_task_found_again_under_another_link_stays_done() {
+        let mut list = TaskList::default();
+        let message = "https://x.slack.com/archives/C1/p1700000000000100";
+        list.merge(&[found("Reply to Manon", "Slack", Some(message))], 1);
+        let id = list.display()[0].id.clone();
+        list.set_done(&id, true, 2);
+        let thread = format!("{message}?thread_ts=1700000000.000100&cid=C1");
+        let again = found("Reply to Manon's answer", "Slack", Some(&thread));
+        assert_eq!(list.merge(std::slice::from_ref(&again), 3), 0);
+        assert!(list.find(&again).unwrap().is_done());
+        assert_eq!(list.open_count(), 0);
+    }
+
+    #[test]
+    fn tasks_without_links_match_by_source_and_title() {
+        let mut list = TaskList::default();
+        list.merge(&[found("Reply to Bo", "Slack", None)], 1);
+        let same = found("reply to bo", "slack", None);
+        assert_eq!(list.merge(std::slice::from_ref(&same), 2), 0);
+        assert!(list.find(&same).is_some());
+        assert!(list.find(&found("Reply to Bo", "Gmail", None)).is_none());
+    }
+
+    #[test]
     fn done_tasks_go_last_and_can_be_reopened() {
         let mut list = TaskList::default();
         list.add_manual("a", 1);
@@ -567,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn prune_forgets_tasks_done_over_a_day_ago() {
+    fn prune_forgets_tasks_done_long_ago() {
         let mut list = TaskList::default();
         list.add_manual("old", 0);
         list.add_manual("recent", 0);

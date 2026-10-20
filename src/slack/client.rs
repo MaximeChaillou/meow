@@ -21,8 +21,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(3);
 const REFRESH_EVERY_POLLS: u32 = 10;
 /// At most this many people are looked up for an invite.
 const MAX_PEOPLE: usize = 100;
-/// Conversation types the first version shows: DMs and group DMs.
-const TYPES: &str = super::api::DIRECT_TYPES;
+/// Conversation types shown: DMs, group DMs and the user's channels.
+const TYPES: &str = super::api::ALL_TYPES;
 
 /// A request from the main thread to the worker.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,6 +77,8 @@ pub enum Event {
     },
     /// The user's own recent messages, newest first, or why they could not be fetched.
     MyMessages(Result<Vec<String>, String>),
+    /// The workspace's custom emoji: names to an image URL or `alias:name`.
+    CustomEmoji(HashMap<String, String>),
 }
 
 /// Owns the worker thread; commands go in, events come out on `events`.
@@ -164,6 +166,7 @@ impl<H: Http> Worker<H> {
             return;
         }
         self.handle(Command::Refresh);
+        self.fetch_emoji();
         loop {
             match commands.recv_timeout(POLL_INTERVAL) {
                 Ok(Command::Stop) | Err(RecvTimeoutError::Disconnected) => return,
@@ -181,6 +184,16 @@ impl<H: Http> Worker<H> {
                 self.emit(Event::Connected(auth))
             }
             Err(err) => self.fail(&err),
+        }
+    }
+
+    /// Custom emoji are a nicety: without them, names stay as typed.
+    fn fetch_emoji(&mut self) {
+        match self.api.emoji_list() {
+            Ok(emoji) => {
+                self.emit(Event::CustomEmoji(emoji));
+            }
+            Err(err) => eprintln!("meow: slack: custom emoji unavailable: {err}"),
         }
     }
 

@@ -50,7 +50,7 @@ const FALLBACK_SAFARI_VERSION: &str = "26.0";
 /// from the client URL (`/client/T…`), else the host's subdomain.
 const READ_SCRIPT: &str = "JSON.stringify({c: localStorage.getItem('localConfig_v2'), \
     t: (location.pathname.match(/\\/client\\/(T[A-Z0-9]+)/) || [])[1] || location.host.split('.')[0], \
-    u: navigator.userAgent})";
+    u: navigator.userAgent, p: location.host + location.pathname})";
 
 /// An in-progress sign-in window.
 pub struct SignIn {
@@ -64,6 +64,10 @@ pub struct SignIn {
     logged_ua: Rc<RefCell<bool>>,
     /// The `d` cookie value, once read.
     cookie: Rc<RefCell<Option<String>>>,
+    /// Where the page is (host and path, no query), for the progress log.
+    page: Rc<RefCell<String>>,
+    /// The last progress line logged, so each change is logged once.
+    reported: RefCell<String>,
     ticks: u32,
 }
 
@@ -114,6 +118,8 @@ impl SignIn {
             hint: Rc::new(RefCell::new(None)),
             logged_ua: Rc::new(RefCell::new(false)),
             cookie: Rc::new(RefCell::new(None)),
+            page: Rc::new(RefCell::new(String::new())),
+            reported: RefCell::new(String::new()),
             ticks: 0,
         }
     }
@@ -125,8 +131,33 @@ impl SignIn {
         if self.ticks.is_multiple_of(PROBE_EVERY_TICKS) {
             self.read_config();
             self.read_cookie();
+            self.report();
         }
         self.try_build()
+    }
+
+    /// Logs how far sign-in has got whenever that changes: the page, and
+    /// whether the token store and cookie were found (never their values).
+    fn report(&self) {
+        let json = self.config_json.borrow().clone();
+        let workspaces = json
+            .as_deref()
+            .map(|json| auth::parse_local_config(json).map(|list| list.len()));
+        let workspaces = match workspaces {
+            None => "no token store".to_string(),
+            Some(Ok(count)) => format!("{count} workspace(s) in the token store"),
+            Some(Err(error)) => format!("token store unreadable: {error}"),
+        };
+        let cookie = if self.cookie.borrow().is_some() {
+            "d cookie found"
+        } else {
+            "no d cookie"
+        };
+        let line = format!("page {}, {workspaces}, {cookie}", self.page.borrow());
+        if *self.reported.borrow() != line {
+            eprintln!("meow: slack sign-in: {line}");
+            self.reported.replace(line);
+        }
     }
 
     /// Whether the window is still open; a user who closes it abandons sign-in.
@@ -144,9 +175,23 @@ impl SignIn {
         let cookie = self.cookie.borrow().clone()?;
         let workspaces = auth::parse_local_config(&json).ok()?;
         let hint = self.hint.borrow().clone();
-        let workspace = auth::select_workspace(&workspaces, hint.as_deref())?;
+        let Some(workspace) = auth::select_workspace(&workspaces, hint.as_deref()) else {
+            self.report_once(&format!("no workspace matches the page ({hint:?})"));
+            return None;
+        };
         let credentials = workspace.with_cookie(cookie);
-        credentials.looks_valid().then_some(credentials)
+        if !credentials.looks_valid() {
+            self.report_once("the token or cookie does not look like Slack's");
+            return None;
+        }
+        Some(credentials)
+    }
+
+    fn report_once(&self, line: &str) {
+        if *self.reported.borrow() != line {
+            eprintln!("meow: slack sign-in: {line}");
+            self.reported.replace(line.to_string());
+        }
     }
 
     /// Reads `localConfig_v2` and the host from the page.
@@ -154,6 +199,7 @@ impl SignIn {
         let config_json = Rc::clone(&self.config_json);
         let hint = Rc::clone(&self.hint);
         let logged_ua = Rc::clone(&self.logged_ua);
+        let page = Rc::clone(&self.page);
         let handler = RcBlock::new(move |result: *mut AnyObject, _error: *mut NSError| {
             if result.is_null() {
                 return;
@@ -169,6 +215,9 @@ impl SignIn {
                 && !logged_ua.replace(true)
             {
                 eprintln!("meow: slack sign-in browser is: {u}");
+            }
+            if let Some(p) = parsed.get("p").and_then(|v| v.as_str()) {
+                page.replace(p.to_string());
             }
             if let Some(t) = parsed.get("t").and_then(|v| v.as_str()) {
                 hint.replace(Some(t.to_string()));

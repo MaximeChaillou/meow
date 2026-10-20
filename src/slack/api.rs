@@ -4,12 +4,16 @@
 //! carrying the session token and the `d` cookie. Bodies are turned into domain
 //! types by [`super::model`].
 
+use std::collections::HashMap;
+
 use super::auth::Credentials;
 use super::http::Http;
 use super::model::{self, Activity, AuthTest, Channel, Message, Page, SlackError, User};
 
 /// Conversation kinds to list for the first version: DMs and group DMs.
 pub const DIRECT_TYPES: &str = "im,mpim";
+/// Direct and group messages, plus the channels the user is in.
+pub const ALL_TYPES: &str = "im,mpim,public_channel,private_channel";
 /// Results per `search.messages` page (Slack's maximum).
 const SEARCH_PAGE_SIZE: &str = "100";
 /// How many messages to load for a conversation at once.
@@ -130,6 +134,12 @@ impl<H: Http> SlackApi<H> {
     pub fn counts(&self) -> Result<Vec<Activity>, ApiError> {
         let body = self.call("client.counts", &[])?;
         model::parse_counts(&body).map_err(ApiError::Slack)
+    }
+
+    /// The workspace's custom emoji: names to an image URL or `alias:name`.
+    pub fn emoji_list(&self) -> Result<HashMap<String, String>, ApiError> {
+        let body = self.call("emoji.list", &[])?;
+        model::parse_emoji_list(&body).map_err(ApiError::Slack)
     }
 
     /// Up to `limit` of `user_id`'s own messages, newest first, from search.

@@ -106,6 +106,39 @@ pub fn same_day_at(at: u64, hour: u32, minute: u32) -> Option<u64> {
     u64::try_from(time).ok()
 }
 
+/// A local date and time, in seconds since the epoch; `None` if the system
+/// cannot represent it.
+pub fn local_timestamp(year: i32, month: i32, day: i32, hour: i32, minute: i32) -> Option<u64> {
+    // SAFETY: an all-zero `tm` is a valid value; every field `mktime` reads is set below.
+    let mut tm: libc::tm = unsafe { MaybeUninit::zeroed().assume_init() };
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month - 1;
+    tm.tm_mday = day;
+    tm.tm_hour = hour;
+    tm.tm_min = minute;
+    // Let the system work out daylight saving time.
+    tm.tm_isdst = -1;
+    // SAFETY: `tm` is a valid, initialized struct owned by this frame.
+    let time = unsafe { libc::mktime(&mut tm) };
+    u64::try_from(time).ok()
+}
+
+/// "today 14:02", "yesterday 09:15" or "19 Oct 14:02", seen from `now`.
+pub fn when_label(at: u64, now: u64) -> String {
+    let Some(time) = local(at) else {
+        return String::new();
+    };
+    let clock = format!("{:02}:{:02}", time.hour, time.minute);
+    let on = |day: u64| local(day).is_some_and(|d| d.same_day(&time));
+    if on(now) {
+        format!("today {clock}")
+    } else if on(now.saturating_sub(86_400)) {
+        format!("yesterday {clock}")
+    } else {
+        format!("{} {clock}", time.short_date())
+    }
+}
+
 /// "Today is Monday 19 October 2026, 07:04 local time."
 pub fn describe(at: u64) -> String {
     match local(at) {
@@ -136,6 +169,27 @@ mod tests {
             (slot.year, slot.month, slot.day),
             (day.year, day.month, day.day)
         );
+    }
+
+    #[test]
+    fn local_timestamps_round_trip() {
+        let at = local_timestamp(2026, 10, 20, 17, 5).unwrap();
+        let t = local(at).unwrap();
+        assert_eq!(
+            (t.year, t.month, t.day, t.hour, t.minute),
+            (2026, 10, 20, 17, 5)
+        );
+    }
+
+    #[test]
+    fn when_labels_name_today_and_yesterday() {
+        let at = NOON_19_OCT_2026_UTC;
+        let clock = local(at).map(|t| format!("{:02}:{:02}", t.hour, t.minute));
+        let clock = clock.unwrap();
+        assert_eq!(when_label(at, at), format!("today {clock}"));
+        assert_eq!(when_label(at, at + 86_400), format!("yesterday {clock}"));
+        let later = when_label(at, at + 5 * 86_400);
+        assert!(later.ends_with(&clock) && later.contains("Oct"), "{later}");
     }
 
     #[test]

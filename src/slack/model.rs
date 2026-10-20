@@ -4,6 +4,8 @@
 //! is `{ "ok": false, "error": "…" }`. Each parser here checks `ok` first and
 //! surfaces the error code, so the transport layer only has to pass the body on.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Why a response could not be turned into domain data.
@@ -73,12 +75,28 @@ pub struct Message {
     pub thread_ts: Option<String>,
     /// Replies to this message, when it starts a thread.
     pub reply_count: u32,
-    /// Names of attached files.
+    /// Names of attached files that are not images.
     pub files: Vec<String>,
+    /// Attached images, drawn in the conversation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<SlackImage>,
     /// A one-line summary of the first attachment (link unfurl, bot card).
     pub attachment: Option<String>,
     /// The name an app or bot posted under, when there is no `user`.
     pub bot_name: Option<String>,
+}
+
+/// An image attached to a message: its thumbnail, behind the session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlackImage {
+    /// Slack's file id.
+    pub id: String,
+    pub title: String,
+    /// The thumbnail to download, on `files.slack.com`.
+    pub thumb: String,
+    /// The file in Slack, to open it full size.
+    #[serde(default)]
+    pub permalink: Option<String>,
 }
 
 impl Message {
@@ -163,7 +181,7 @@ pub fn parse_messages(body: &str) -> Result<Page<Message>, SlackError> {
 }
 
 /// Per-conversation activity from `client.counts`: what Slack's own sidebar
-/// shows, for direct and group messages.
+/// shows, for direct and group messages and channels.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Activity {
     pub id: String,
@@ -172,7 +190,8 @@ pub struct Activity {
     pub mentions: u32,
 }
 
-/// Parses a `client.counts` body into its direct and group conversations.
+/// Parses a `client.counts` body into its direct and group conversations
+/// and channels.
 pub fn parse_counts(body: &str) -> Result<Vec<Activity>, SlackError> {
     let raw: CountsResponse = decode(body)?;
     ok(raw.ok, raw.error)?;
@@ -180,6 +199,7 @@ pub fn parse_counts(body: &str) -> Result<Vec<Activity>, SlackError> {
         .ims
         .into_iter()
         .chain(raw.mpims)
+        .chain(raw.channels)
         .map(|count| Activity {
             id: count.id,
             latest: Some(count.latest).filter(|ts| !ts.is_empty()),
@@ -253,6 +273,21 @@ pub fn parse_user(body: &str) -> Result<User, SlackError> {
 pub fn parse_ok(body: &str) -> Result<(), SlackError> {
     let raw: Envelope = decode(body)?;
     ok(raw.ok, raw.error)
+}
+
+/// Parses an `emoji.list` body: custom emoji names to an image URL or `alias:name`.
+pub fn parse_emoji_list(body: &str) -> Result<HashMap<String, String>, SlackError> {
+    #[derive(Deserialize)]
+    struct EmojiList {
+        ok: bool,
+        #[serde(default)]
+        error: Option<String>,
+        #[serde(default)]
+        emoji: HashMap<String, String>,
+    }
+    let raw: EmojiList = decode(body)?;
+    ok(raw.ok, raw.error)?;
+    Ok(raw.emoji)
 }
 
 fn decode<T: for<'de> Deserialize<'de>>(body: &str) -> Result<T, SlackError> {
@@ -395,9 +430,39 @@ struct RawMessage {
 #[derive(Deserialize)]
 struct RawFile {
     #[serde(default)]
+    id: String,
+    #[serde(default)]
     name: String,
     #[serde(default)]
     title: String,
+    #[serde(default)]
+    mimetype: String,
+    #[serde(default)]
+    thumb_480: Option<String>,
+    #[serde(default)]
+    thumb_360: Option<String>,
+    #[serde(default)]
+    permalink: Option<String>,
+}
+
+impl RawFile {
+    /// The file as an image to draw, when it is one with a thumbnail.
+    fn image(&self) -> Option<SlackImage> {
+        if !self.mimetype.starts_with("image/") || self.id.is_empty() {
+            return None;
+        }
+        let thumb = self
+            .thumb_480
+            .clone()
+            .or_else(|| self.thumb_360.clone())
+            .filter(|url| url.starts_with("https://"))?;
+        Some(SlackImage {
+            id: self.id.clone(),
+            title: first_non_empty([self.title.clone(), self.name.clone()]),
+            thumb,
+            permalink: self.permalink.clone(),
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -418,8 +483,12 @@ struct RawBotProfile {
 
 impl From<RawMessage> for Message {
     fn from(raw: RawMessage) -> Self {
-        let files = raw
+        let (images, others): (Vec<_>, Vec<_>) = raw
             .files
+            .into_iter()
+            .partition(|file| file.image().is_some());
+        let images = images.iter().filter_map(RawFile::image).collect();
+        let files = others
             .into_iter()
             .map(|file| first_non_empty([file.title, file.name]))
             .filter(|name| !name.is_empty())
@@ -442,6 +511,7 @@ impl From<RawMessage> for Message {
             thread_ts: raw.thread_ts,
             reply_count: raw.reply_count,
             files,
+            images,
             attachment,
             bot_name,
         }
@@ -506,6 +576,8 @@ struct CountsResponse {
     ims: Vec<RawCount>,
     #[serde(default)]
     mpims: Vec<RawCount>,
+    #[serde(default)]
+    channels: Vec<RawCount>,
 }
 
 #[derive(Deserialize)]
@@ -660,6 +732,22 @@ mod tests {
     }
 
     #[test]
+    fn image_files_keep_their_thumbnail() {
+        let body = r#"{"ts":"1.0","files":[
+            {"id":"F1","name":"shot.png","title":"Screenshot","mimetype":"image/png",
+             "thumb_360":"https://files.slack.com/F1/360.png",
+             "thumb_480":"https://files.slack.com/F1/480.png",
+             "permalink":"https://x.slack.com/files/U1/F1/shot.png"},
+            {"id":"F2","name":"notes.pdf","mimetype":"application/pdf"},
+            {"id":"F3","name":"huge.png","mimetype":"image/png"}]}"#;
+        let msg: Message = serde_json::from_str::<RawMessage>(body).unwrap().into();
+        assert_eq!(msg.images.len(), 1);
+        assert_eq!(msg.images[0].thumb, "https://files.slack.com/F1/480.png");
+        assert_eq!(msg.images[0].title, "Screenshot");
+        assert_eq!(msg.files, ["notes.pdf", "huge.png"]);
+    }
+
+    #[test]
     fn files_attachments_and_bot_names_are_captured() {
         let body = r#"{"ok":true,"messages":[{"ts":"1.0","text":"",
             "files":[{"name":"a.png","title":"Screenshot"},{"name":"b.pdf"}],
@@ -672,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    fn counts_merge_direct_and_group_messages() {
+    fn counts_merge_direct_and_group_messages_and_channels() {
         let body = r#"{"ok":true,
             "ims":[{"id":"D1","latest":"5.0","has_unreads":true,"mention_count":2}],
             "mpims":[{"id":"G1","latest":"","has_unreads":false,"mention_count":0}],
@@ -691,6 +779,12 @@ mod tests {
                     id: "G1".into(),
                     latest: None,
                     unread: false,
+                    mentions: 0
+                },
+                Activity {
+                    id: "C1".into(),
+                    latest: Some("9.0".into()),
+                    unread: true,
                     mentions: 0
                 },
             ]

@@ -4,21 +4,26 @@
 use std::cell::{Cell, RefCell};
 
 use meow::actions::QuickAction;
+use meow::activity::ActivityLog;
+use meow::routines::Routines;
 use meow::tasks::TaskList;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadMarker, sel};
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSButton, NSColor, NSLineBreakMode, NSScreen, NSStatusWindowLevel,
-    NSTextField, NSWindowCollectionBehavior,
+    NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSAutoresizingMaskOptions,
+    NSBitmapImageFileType, NSButton, NSColor, NSLineBreakMode, NSScreen, NSStatusWindowLevel,
+    NSTextAlignment, NSTextField, NSView, NSWindowCollectionBehavior,
 };
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
-use super::bubble::{BubblePanel, BubbleView};
+use super::activity_page::ActivityPage;
+use super::bubble::{self, BubblePanel, BubbleView};
 use super::chat_page::ChatPage;
 use super::controller::Controller;
 use super::plan_page::PlanPage;
 use super::rich_text::{self, Attributes};
+use super::routines_page::RoutinesPage;
 use super::sidebar::{self, Page, Selection, Sidebar};
 use super::slack_page::SlackPage;
 use super::task_page::TaskPage;
@@ -31,6 +36,8 @@ const MIN_SIZE: NSSize = NSSize::new(480.0, 300.0);
 const CLOSE_SIZE: f64 = 26.0;
 const HEADER_INSET: f64 = 10.0;
 const RUN_WIDTH: f64 = 70.0;
+/// Least space between the page title and its status.
+const SUBTITLE_GAP: f64 = 16.0;
 
 pub struct ChatWindow {
     panel: Retained<BubblePanel>,
@@ -40,9 +47,14 @@ pub struct ChatWindow {
     tasks: TaskPage,
     plan: PlanPage,
     slack: SlackPage,
+    activity: ActivityPage,
+    routines: RoutinesPage,
     page: Cell<Page>,
     /// Top line of the page: "Chat", "Tasks", or the task being discussed.
     header: Retained<NSTextField>,
+    /// Right end of the top line: "6 open · checked at 09:40", "ran 7 h ago".
+    subtitle: Retained<NSTextField>,
+    open_tasks: Cell<usize>,
     /// Re-runs the quick action shown on the chat page.
     run_button: Retained<NSButton>,
     chat_title: RefCell<String>,
@@ -73,20 +85,26 @@ impl ChatWindow {
         bubble.addSubview(&sidebar.view);
         bubble.set_sidebar_right(inner.origin.x + sidebar::WIDTH);
 
+        // Pages run on to the outline on the right and at the bottom, so their
+        // bars and strips can reach it; each page keeps its own margins.
         let page_frame = rect(
             inner.origin.x + sidebar::WIDTH,
             inner.origin.y + CLOSE_SIZE,
-            inner.size.width - sidebar::WIDTH,
-            inner.size.height - CLOSE_SIZE,
+            inner.size.width - sidebar::WIDTH + bubble::PADDING,
+            inner.size.height - CLOSE_SIZE + bubble::PADDING,
         );
         let chat = ChatPage::new(mtm, controller, page_frame);
         let tasks = TaskPage::new(mtm, controller, page_frame);
         let plan = PlanPage::new(mtm, controller, page_frame);
         let slack = SlackPage::new(mtm, controller, page_frame);
+        let activity = ActivityPage::new(mtm, controller, page_frame);
+        let routines = RoutinesPage::new(mtm, controller, page_frame);
         bubble.addSubview(&chat.view);
         bubble.addSubview(&tasks.view);
         bubble.addSubview(&plan.view);
         bubble.addSubview(&slack.view);
+        bubble.addSubview(&activity.view);
+        bubble.addSubview(&routines.view);
         bubble.addSubview(&close_button(mtm, controller, inner));
         let header = NSTextField::labelWithString(&NSString::from_str(""), mtm);
         header.setFrame(rect(
@@ -98,9 +116,23 @@ impl ChatWindow {
         header.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
         header.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
         bubble.addSubview(&header);
+        // Same row as the title, pinned to the top-right corner (see `layout_subtitle`).
+        let subtitle = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+        subtitle.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxYMargin,
+        );
+        subtitle.setAlignment(NSTextAlignment::Right);
+        subtitle.setLineBreakMode(NSLineBreakMode::ByTruncatingHead);
+        bubble.addSubview(&subtitle);
 
         let target: &AnyObject = controller;
-        let run_button = widgets::text_button(mtm, "Run", target, sel!(runAction:));
+        let run_button = widgets::text_button(
+            mtm,
+            "Run",
+            widgets::ButtonStyle::Primary,
+            target,
+            sel!(runAction:),
+        );
         run_button.setToolTip(Some(&NSString::from_str("Run this quick action again")));
         run_button.setFrame(rect(
             inner.origin.x + inner.size.width - CLOSE_SIZE - RUN_WIDTH,
@@ -122,8 +154,12 @@ impl ChatWindow {
             tasks,
             plan,
             slack,
+            activity,
+            routines,
             page: Cell::new(Page::Chat),
             header,
+            subtitle,
+            open_tasks: Cell::new(0),
             run_button,
             chat_title: RefCell::new("Chat".to_string()),
             tasks_title: RefCell::new("Tasks".to_string()),
@@ -150,6 +186,30 @@ impl ChatWindow {
         &self.slack
     }
 
+    pub fn activity(&self) -> &ActivityPage {
+        &self.activity
+    }
+
+    pub fn routines(&self) -> &RoutinesPage {
+        &self.routines
+    }
+
+    /// Redraws the Scheduled page and the active count in the sidebar.
+    pub fn render_routines(&self, routines: &Routines, running: Option<u64>, now: u64) {
+        self.routines.render(routines, running, now);
+        self.sidebar.set_active_routines(routines.active_count());
+    }
+
+    pub fn set_unread_activity(&self, count: usize) {
+        self.sidebar.set_unread_activity(count);
+    }
+
+    /// Redraws the Activity page and the unread count in the sidebar.
+    pub fn render_activity(&self, log: &ActivityLog, now: u64) {
+        self.activity.render(log, now);
+        self.sidebar.set_unread_activity(log.unread_count());
+    }
+
     /// Puts a draft in the Slack reply box and focuses it.
     pub fn put_slack_draft(&self, text: &str) {
         self.slack.set_input(text, &self.panel);
@@ -174,6 +234,15 @@ impl ChatWindow {
         self.tasks.view.setHidden(page != Page::Tasks);
         self.plan.view.setHidden(page != Page::Plan);
         self.slack.view.setHidden(page != Page::Slack);
+        self.activity.view.setHidden(page != Page::Activity);
+        self.routines.view.setHidden(page != Page::Routines);
+        self.refresh_header();
+        self.focus();
+    }
+
+    /// The top line of the page shown: its name on the left, its status on the right.
+    fn refresh_header(&self) {
+        let page = self.page();
         let (title, selection, can_run) = match page {
             // A plan is a quick action's result: same title and [ RUN ] as its chat.
             Page::Chat | Page::Plan => (
@@ -183,17 +252,53 @@ impl ChatWindow {
             ),
             Page::Tasks => (self.tasks_title.borrow().clone(), Selection::Tasks, false),
             Page::Slack => ("Slack".to_string(), Selection::Slack, false),
+            Page::Activity => ("Activity".to_string(), Selection::Activity, false),
+            Page::Routines => ("Scheduled".to_string(), Selection::Routines, false),
         };
         self.sidebar.select(selection);
         self.run_button.setHidden(!can_run);
+        let (name, status) = match title.split_once(" · ") {
+            Some((name, status)) => (name.to_string(), Some(status.to_string())),
+            None => (title, None),
+        };
+        let status = if page == Page::Tasks {
+            let open = format!("{} open", self.open_tasks.get());
+            Some(status.map_or(open.clone(), |status| format!("{open} · {status}")))
+        } else {
+            status
+        };
         self.header.setAttributedStringValue(&rich_text::attributed(
-            &title,
-            &Attributes {
-                heavy: true,
-                ..Attributes::plain(theme::ink(), theme::font(theme::BODY_SIZE))
-            },
+            &name,
+            &Attributes::plain(theme::highlight(), theme::title_font(theme::TITLE_SIZE)),
         ));
-        self.focus();
+        self.subtitle
+            .setAttributedStringValue(&rich_text::attributed(
+                status.as_deref().unwrap_or(""),
+                &Attributes::plain(theme::muted(), theme::font(theme::SMALL_SIZE)),
+            ));
+        self.layout_subtitle();
+    }
+
+    /// Pins the status to the top-right corner of the page, just left of the
+    /// close button (or of RUN when shown), centered on the title's line. It
+    /// never starts before the end of the title.
+    fn layout_subtitle(&self) {
+        let row = self.header.frame();
+        let run = self.run_button.frame();
+        let right = if self.run_button.isHidden() {
+            run.origin.x + run.size.width
+        } else {
+            run.origin.x
+        } - SUBTITLE_GAP / 2.0;
+        let title_end = row.origin.x + self.header.fittingSize().width.min(row.size.width);
+        let size = self.subtitle.fittingSize();
+        let width = size.width.min((right - title_end - SUBTITLE_GAP).max(0.0));
+        self.subtitle.setFrame(rect(
+            right - width,
+            row.origin.y + ((row.size.height - size.height) / 2.0).max(0.0),
+            width,
+            size.height,
+        ));
     }
 
     /// Names the conversation shown on the chat or plan page, the sidebar
@@ -214,7 +319,7 @@ impl ChatWindow {
         }
         self.tasks_title.replace(title.to_string());
         if self.page() == Page::Tasks {
-            self.show_page(Page::Tasks);
+            self.refresh_header();
         }
     }
 
@@ -224,13 +329,19 @@ impl ChatWindow {
             Page::Tasks => self.tasks.focus(&self.panel),
             Page::Plan => self.plan.focus(&self.panel),
             Page::Slack => self.slack.focus(&self.panel),
+            // Nothing to type into: the bubble itself keeps the focus.
+            Page::Activity | Page::Routines => {}
         }
     }
 
     /// Redraws the task page and the open count in the sidebar.
-    pub fn render_tasks(&self, tasks: &TaskList) {
-        self.tasks.render(tasks);
+    pub fn render_tasks(&self, tasks: &TaskList, now: u64) {
+        self.tasks.render(tasks, now);
         self.sidebar.set_open_tasks(tasks.open_count());
+        self.open_tasks.set(tasks.open_count());
+        if self.page() == Page::Tasks {
+            self.refresh_header();
+        }
     }
 
     /// Opens the bubble just above `anchor` (the cat), kept on screen, with
@@ -258,8 +369,30 @@ impl ChatWindow {
         self.panel.orderOut(None);
     }
 
+    /// Saves the bubble as it looks now to a PNG at `path` (debug snapshots).
+    pub fn snapshot(&self, path: &std::path::Path) -> Result<(), String> {
+        let view: &NSView = &self.bubble;
+        view.displayIfNeeded();
+        let bounds = view.bounds();
+        let rep = view
+            .bitmapImageRepForCachingDisplayInRect(bounds)
+            .ok_or("no bitmap for the bubble")?;
+        view.cacheDisplayInRect_toBitmapImageRep(bounds, &rep);
+        // SAFETY: an empty properties dictionary is valid for PNG output.
+        let data = unsafe {
+            rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
+        }
+        .ok_or("could not encode the PNG")?;
+        std::fs::write(path, data.to_vec()).map_err(|e| e.to_string())
+    }
+
     pub fn set_busy(&self, busy: bool) {
         self.sidebar.set_busy(busy);
+    }
+
+    /// The cat beside the title takes the coat chosen for the cat.
+    pub fn set_coat(&self, coat: meow::sprites::Coat) {
+        self.sidebar.set_coat(coat);
     }
 }
 
@@ -270,6 +403,11 @@ fn make_panel(mtm: MainThreadMarker) -> Retained<BubblePanel> {
     panel.setTitle(&NSString::from_str("Meow"));
     panel.setOpaque(false);
     panel.setBackgroundColor(Some(&NSColor::clearColor()));
+    // Dark controls (fields, checkboxes, scrollers) on the dark bubble.
+    // SAFETY: AppKit's appearance-name constant is an immutable static.
+    panel.setAppearance(
+        NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }).as_deref(),
+    );
     // The bubble draws its own pixel shadow.
     panel.setHasShadow(false);
     panel.setMovableByWindowBackground(true);
@@ -304,7 +442,7 @@ fn close_button(
     button.setBordered(false);
     button.setAttributedTitle(&rich_text::attributed(
         "✕",
-        &Attributes::plain(theme::muted(), theme::font(theme::TITLE_SIZE)),
+        &Attributes::plain(theme::ink(), theme::font(24.0)),
     ));
     button.setToolTip(Some(&NSString::from_str("Close (Esc)")));
     button.setFrame(rect(

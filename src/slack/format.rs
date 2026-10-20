@@ -4,7 +4,8 @@
 //! `<` and `>` as HTML entities. Its emphasis markup also differs from
 //! CommonMark: bold is a single `*` and strikethrough a single `~`. This module
 //! turns a raw message into Markdown so mentions read as names, channels as
-//! `#name`, and links stay clickable in the transcript.
+//! `#name`, links stay clickable in the transcript, and `:emoji:` shortcodes
+//! show as the emoji themselves.
 
 use std::collections::HashMap;
 
@@ -36,12 +37,101 @@ impl Names for NameMap {
 /// with `names`.
 pub fn to_markdown(text: &str, names: &impl Names) -> String {
     let resolved = resolve_tokens(text, names);
-    let decoded = decode_entities(&resolved);
+    let decoded = replace_emoji(&decode_entities(&resolved));
     // One pass per delimiter; the second runs over the first's output, which is
     // fine because each pass only touches its own delimiter and leaves code
     // spans untouched.
     let bold = convert_delim(&decoded, '*', "**");
     convert_delim(&bold, '~', "~~")
+}
+
+/// Slack's own names for emoji that the standard shortcode list lacks.
+const SLACK_ALIASES: [(&str, &str); 3] = [
+    ("simple_smile", "slightly_smiling_face"),
+    ("thumbsup_all", "+1"),
+    ("slack_call", "telephone_receiver"),
+];
+
+/// Turns `:shortcode:` (and Slack's `:wave::skin-tone-3:`) into the emoji,
+/// outside code spans and blocks. Unknown names, such as a workspace's custom
+/// emoji, are left as typed.
+fn replace_emoji(text: &str) -> String {
+    text.split('`')
+        .enumerate()
+        .map(|(i, part)| {
+            // Odd pieces sit between backticks: code, shown as typed.
+            if i % 2 == 1 {
+                part.to_string()
+            } else {
+                replace_shortcodes(part)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("`")
+}
+
+fn replace_shortcodes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(':') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let name_len = after
+            .find(|c: char| !is_shortcode_char(c))
+            .unwrap_or(after.len());
+        let closed = after[name_len..].starts_with(':');
+        let emoji = (closed && name_len > 0)
+            .then(|| emoji_for(&after[..name_len]))
+            .flatten();
+        let Some(emoji) = emoji else {
+            // Not an emoji: keep the colon, and look again from the next character.
+            out.push(':');
+            rest = after;
+            continue;
+        };
+        rest = &after[name_len + 1..];
+        let (emoji, skip) = with_skin_tone(emoji, rest);
+        out.push_str(emoji.as_str());
+        rest = &rest[skip..];
+    }
+    out.push_str(rest);
+    out
+}
+
+pub(crate) fn is_shortcode_char(c: char) -> bool {
+    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '+' | '-' | '\'')
+}
+
+fn emoji_for(name: &str) -> Option<&'static emojis::Emoji> {
+    let name = SLACK_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == name)
+        .map_or(name, |(_, standard)| standard);
+    emojis::get_by_shortcode(name)
+}
+
+/// Applies a `:skin-tone-N:` right after an emoji; returns the emoji and how
+/// much of `rest` the suffix took.
+fn with_skin_tone(emoji: &'static emojis::Emoji, rest: &str) -> (&'static emojis::Emoji, usize) {
+    use emojis::SkinTone;
+    let tones = [
+        ("skin-tone-2:", SkinTone::Light),
+        ("skin-tone-3:", SkinTone::MediumLight),
+        ("skin-tone-4:", SkinTone::Medium),
+        ("skin-tone-5:", SkinTone::MediumDark),
+        ("skin-tone-6:", SkinTone::Dark),
+    ];
+    let Some(suffix) = rest.strip_prefix(':') else {
+        return (emoji, 0);
+    };
+    tones
+        .iter()
+        .find(|(code, _)| suffix.starts_with(code))
+        .map(|(code, tone)| {
+            let toned = emoji.with_skin_tone(*tone).unwrap_or(emoji);
+            (toned, 1 + code.len())
+        })
+        .unwrap_or((emoji, 0))
 }
 
 /// Replaces every `<…>` token with readable text, leaving other characters as is.
@@ -205,6 +295,33 @@ fn emphasis_close(chars: &[char], open: usize, delim: char) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortcodes_become_emoji() {
+        let names = NameMap::default();
+        assert_eq!(to_markdown("Top :+1: :tada:!", &names), "Top 👍 🎉!");
+        assert_eq!(to_markdown(":heart::smile:", &names), "❤️😄");
+        assert_eq!(to_markdown(":simple_smile:", &names), "🙂");
+    }
+
+    #[test]
+    fn skin_tones_apply_to_the_emoji_before() {
+        let names = NameMap::default();
+        assert_eq!(to_markdown(":wave::skin-tone-3:", &names), "👋🏼");
+        assert_eq!(
+            to_markdown(":wave::skin-tone-9:", &names),
+            "👋:skin-tone-9:"
+        );
+    }
+
+    #[test]
+    fn unknown_names_times_and_code_stay_as_typed() {
+        let names = NameMap::default();
+        assert_eq!(to_markdown("at 10:30:00", &names), "at 10:30:00");
+        assert_eq!(to_markdown(":partyparrot: hi", &names), ":partyparrot: hi");
+        assert_eq!(to_markdown("`:tada:` :tada:", &names), "`:tada:` 🎉");
+        assert_eq!(to_markdown("a: b :", &names), "a: b :");
+    }
 
     fn names() -> NameMap {
         NameMap {

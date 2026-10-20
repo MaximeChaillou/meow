@@ -11,6 +11,10 @@ pub const SYNC_FENCE: &str = "meow-sync";
 const FIRST_LOOKBACK_HOURS: u64 = 24;
 /// At most this many open tasks are sent, to keep the check small.
 const MAX_CHECKED: usize = 40;
+/// At most this many handled tasks are sent, so they are not reported again.
+pub const MAX_HANDLED: usize = 40;
+/// How Claude should judge whether I answered on Slack.
+pub const SLACK_REPLY_RULE: &str = "On Slack, I have answered when I posted in the same DM      or channel after that message, in its thread or not, or reacted to it.";
 
 /// What a check found.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -22,8 +26,9 @@ pub struct SyncReport {
     pub new: Vec<FoundTask>,
 }
 
-/// The prompt for one check. `since` is the time of the last successful check.
-pub fn prompt(open: &[&Task], since: Option<u64>, now: u64) -> String {
+/// The prompt for one check. `handled` are tasks I already ticked off, never
+/// to be reported again; `since` is the time of the last successful check.
+pub fn prompt(open: &[&Task], handled: &[&Task], since: Option<u64>, now: u64) -> String {
     let tasks: Vec<_> = open
         .iter()
         .take(MAX_CHECKED)
@@ -35,6 +40,11 @@ pub fn prompt(open: &[&Task], since: Option<u64>, now: u64) -> String {
                 "url": t.url,
             })
         })
+        .collect();
+    let handled: Vec<_> = handled
+        .iter()
+        .take(MAX_HANDLED)
+        .map(|t| serde_json::json!({"title": t.title, "source": t.source, "url": t.url}))
         .collect();
     let window = match since {
         Some(since) => format!(
@@ -49,17 +59,21 @@ pub fn prompt(open: &[&Task], since: Option<u64>, now: u64) -> String {
          modify anything. Use my connectors directly (Linear, GitHub, Slack, Gmail); do not \
          launch sub-agents. Keep it quick.\n\n\
          1. For each open task below, check whether it is resolved at its source: Linear issue \
-         done or canceled, pull request merged, closed or already reviewed by me, Slack thread \
-         or DM I have replied to, email I have answered. Only count it as resolved when you are \
-         sure.\n\
+         done or canceled, pull request merged, closed or already reviewed by me, Slack message \
+         I have answered, email I have answered. {SLACK_REPLY_RULE} Only count it as resolved \
+         when you are sure.\n\
          2. Find new things waiting on me {window}: Linear issues newly assigned to me, pull \
          requests newly requesting my review, Slack DMs or mentions I have not answered, emails \
-         waiting for my answer. Skip anything already in the list.\n\n\
+         waiting for my answer. Skip anything in either list below, including the same message, \
+         issue or pull request under another title or link: I have dealt with the handled ones \
+         and do not want them back.\n\n\
          Open tasks (JSON):\n{}\n\n\
+         Already handled, never report again (JSON):\n{}\n\n\
          Reply with only a fenced code block with the info string `{SYNC_FENCE}` holding \
          {{\"done\": [ids of resolved tasks], \"new\": [{{\"title\": short imperative title, \
          \"source\": \"Linear\"|\"GitHub\"|\"Slack\"|\"Gmail\", \"url\": link or null}}]}}.",
-        serde_json::Value::Array(tasks)
+        serde_json::Value::Array(tasks),
+        serde_json::Value::Array(handled)
     )
 }
 
@@ -115,7 +129,7 @@ mod tests {
     #[test]
     fn prompt_lists_open_tasks_with_their_ids_and_is_read_only() {
         let list = list();
-        let prompt = prompt(&list.display(), None, 100);
+        let prompt = prompt(&list.display(), &[], None, 100);
         assert!(prompt.contains("\"id\":\"url:https://github.com/x/3172\""));
         assert!(prompt.contains("Only read"));
         assert!(prompt.contains("in the last 24 hours"));
@@ -123,8 +137,19 @@ mod tests {
     }
 
     #[test]
+    fn prompt_lists_handled_tasks_and_counts_replies_outside_threads() {
+        let mut list = list();
+        let id = list.display()[0].id.clone();
+        list.set_done(&id, true, 2);
+        let prompt = prompt(&[], &list.recently_done(MAX_HANDLED), None, 100);
+        assert!(prompt.contains("never report again"));
+        assert!(prompt.contains("Review PR 3172"));
+        assert!(prompt.contains("in its thread or not"));
+    }
+
+    #[test]
     fn prompt_looks_back_to_the_last_check() {
-        let prompt = prompt(&[], Some(1_792_400_000), 1_792_400_600);
+        let prompt = prompt(&[], &[], Some(1_792_400_000), 1_792_400_600);
         assert!(prompt.contains("since 2026-10-19T"), "{prompt}");
         assert!(prompt.contains("10 minutes ago"));
     }

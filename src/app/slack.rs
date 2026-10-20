@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use meow::activity::{Kind, Link, Note};
 use meow::slack::assist::Line;
 use meow::slack::auth::Credentials;
 use meow::slack::cache::{self, SlackCache};
@@ -16,9 +17,10 @@ use meow::slack::keychain;
 use meow::slack::model::{Channel, ChannelKind, Message};
 use meow::slack::timeline::{self, Author, Entry};
 
+use crate::ui::emoji_text;
 use crate::ui::sidebar::Page;
 use crate::ui::signin::SignIn;
-use crate::ui::slack_page::{ConversationRow, TranscriptItem};
+use crate::ui::slack_page::{ConversationRow, SlackTab, TranscriptItem};
 
 use super::{App, now_secs};
 
@@ -39,6 +41,12 @@ pub(super) struct AssistContext {
 pub struct SlackState {
     /// The background connection; `None` while signed out.
     client: Option<SlackClient>,
+    /// The session in use, for attached images (they sit behind it).
+    file_auth: Option<super::downloads::SlackAuth>,
+    /// Whether the session in use is the one saved in the Keychain (or just
+    /// signed in), so an expired one may be forgotten there. One from the
+    /// `MEOW_SLACK_*` variables never touches the Keychain.
+    saved_session: bool,
     /// Whether `auth.test` has confirmed the session.
     signed_in: bool,
     /// Our own user id, to tell our messages apart.
@@ -81,7 +89,10 @@ impl SlackState {
             cache_path,
             ..Self::default()
         };
-        if let Some(creds) = load_credentials() {
+        // Snapshots show sample messages; they never sign in.
+        let snapshot = std::env::var_os("MEOW_SNAPSHOT_DIR").is_some();
+        if let Some((creds, saved)) = load_credentials().filter(|_| !snapshot) {
+            state.saved_session = saved;
             state.connect(creds);
         }
         state
@@ -89,6 +100,10 @@ impl SlackState {
 
     /// Connects, showing what the cache holds for this account meanwhile.
     fn connect(&mut self, creds: Credentials) {
+        self.file_auth = Some(super::downloads::SlackAuth {
+            token: creds.token.clone(),
+            cookie: creds.cookie.clone(),
+        });
         self.adopt_cache(&creds.user_id);
         self.channels = self.cache.channels.clone();
         self.names.users.extend(self.cache.names());
@@ -148,6 +163,7 @@ impl SlackState {
                 title: channel_title(channel, &self.names),
                 unread: channel.unread,
                 mentions: channel.mentions,
+                direct: channel.kind != ChannelKind::Channel,
                 time: channel
                     .latest_ts
                     .as_deref()
@@ -178,7 +194,7 @@ impl SlackState {
                     mine: matches!(author, Author::User(id) if Some(id) == self.me.as_deref()),
                     bodies: messages
                         .into_iter()
-                        .map(|message| message_body(message, &self.names))
+                        .map(|message| message_body(message, &self.names, true))
                         .collect(),
                 },
             })
@@ -227,7 +243,7 @@ impl SlackState {
                     (None, Some(bot)) => bot.clone(),
                     (user, _) => self.name_of(user.as_deref()),
                 },
-                text: message_body(message, &self.names),
+                text: message_body(message, &self.names, false),
             })
             .collect();
         Some(AssistContext {
@@ -236,6 +252,11 @@ impl SlackState {
             me: self.my_name(),
             lines,
         })
+    }
+
+    /// The session, to download attached images.
+    pub(super) fn file_auth(&self) -> Option<super::downloads::SlackAuth> {
+        self.file_auth.clone()
     }
 
     /// The open conversation's id, if one is open.
@@ -263,7 +284,10 @@ impl App {
     pub(super) fn sign_in_slack(&mut self) {
         // Configured credentials win; otherwise open the embedded web sign-in.
         match load_credentials() {
-            Some(creds) => self.slack.connect(creds),
+            Some((creds, saved)) => {
+                self.slack.saved_session = saved;
+                self.slack.connect(creds);
+            }
             None => {
                 if self.slack.signin.is_none() {
                     self.slack.signin = Some(SignIn::present(self.mtm));
@@ -275,9 +299,13 @@ impl App {
     }
 
     pub(super) fn open_slack_conversation(&mut self, row: usize) {
-        let Some(id) = self.chat.slack().id_at(row) else {
-            return;
-        };
+        if let Some(id) = self.chat.slack().id_at(row) {
+            self.open_slack_channel(id);
+        }
+    }
+
+    /// Opens conversation `id` on the Slack page.
+    pub(super) fn open_slack_channel(&mut self, id: String) {
         self.close_slack_assist();
         self.slack.open = Some(id.clone());
         // What was last seen, until Slack sends the latest.
@@ -292,6 +320,12 @@ impl App {
         if let Some(client) = &self.slack.client {
             client.send(Command::Open(id));
         }
+    }
+
+    /// Switches the conversation list to `tab`.
+    pub(super) fn show_slack_tab(&mut self, tab: SlackTab) {
+        self.chat.slack().set_tab(tab);
+        self.render_slack();
     }
 
     pub(super) fn slack_back(&mut self) {
@@ -355,6 +389,7 @@ impl App {
             if let Err(error) = keychain::save(&credentials) {
                 eprintln!("meow: {error}");
             }
+            self.slack.saved_session = true;
             self.slack.connect(credentials);
             if self.slack_visible() {
                 self.render_slack();
@@ -403,6 +438,7 @@ impl App {
             Event::New { channel, messages } => {
                 self.slack.cache.append(&channel, &messages);
                 self.slack.cache_dirty = true;
+                self.notify_slack(&channel, &messages);
                 if self.slack.open.as_deref() == Some(&channel) {
                     let from_others = messages
                         .iter()
@@ -424,13 +460,16 @@ impl App {
                 }
             }
             Event::MyMessages(result) => self.on_my_messages(result),
+            Event::CustomEmoji(raw) => self.on_custom_emoji(&raw),
             Event::People { channel, people } => self.on_people(channel, people),
             Event::Expired => {
                 self.close_slack_assist();
                 self.slack.signed_in = false;
                 self.slack.client = None;
                 self.slack.open = None;
-                let _ = keychain::clear();
+                if self.slack.saved_session {
+                    let _ = keychain::clear();
+                }
                 self.slack.status = Some("Your Slack session ended. Sign in again.".to_string());
             }
         }
@@ -440,16 +479,25 @@ impl App {
     }
 
     /// Draws the Slack page for the current state: signed out, a list, or a chat.
-    fn render_slack(&self) {
-        let page = self.chat.slack();
+    pub(super) fn render_slack(&mut self) {
         if !self.slack.signed_in && !self.slack.showing_cached() {
-            page.show_signed_out(self.slack.status.as_deref());
+            self.chat
+                .slack()
+                .show_signed_out(self.slack.status.as_deref());
             return;
         }
+        if self.slack.open.is_some() {
+            let messages = self.slack.messages.clone();
+            self.want_images(&messages);
+        }
+        let page = self.chat.slack();
         match &self.slack.open {
-            Some(_) => {
-                page.render_conversation(&self.slack.open_title(), &self.slack.rendered(now_secs()))
-            }
+            Some(_) => page.render_conversation(
+                &self.slack.open_title(),
+                &self.slack.rendered(now_secs()),
+                &self.emoji.glyphs,
+                &self.emoji.images,
+            ),
             None => {
                 page.render_list(&self.slack.rows(now_secs()));
                 page.render_voice(&self.voice_bar_state());
@@ -457,14 +505,59 @@ impl App {
         }
     }
 
+    /// A DM or a mention from someone else, out of sight, goes to Activity.
+    fn notify_slack(&mut self, channel: &str, messages: &[Message]) {
+        let watching = self.slack_visible() && self.slack.open.as_deref() == Some(channel);
+        let Some(conversation) = self.slack.channels.iter().find(|c| c.id == channel) else {
+            return;
+        };
+        let me = self.slack.me.as_deref();
+        let for_me: Vec<&Message> = messages
+            .iter()
+            .filter(|m| m.user.is_some() && m.user.as_deref() != me)
+            .filter(|m| is_for_me(conversation.kind, &m.text, me))
+            .collect();
+        let Some(last) = for_me.last() else { return };
+        if watching {
+            return;
+        }
+        let sender = self.slack.name_of(last.user.as_deref());
+        let place = channel_title(conversation, &self.slack.names);
+        let mut title = if conversation.kind == ChannelKind::Im {
+            sender
+        } else {
+            format!("{sender} in {place}")
+        };
+        if for_me.len() > 1 {
+            title.push_str(&format!(" ({} messages)", for_me.len()));
+        }
+        let detail = message_body(last, &self.slack.names, false);
+        self.notify(Note {
+            kind: Kind::Slack,
+            title,
+            detail: Some(detail),
+            link: Some(Link::Slack {
+                channel: channel.to_string(),
+            }),
+        });
+    }
+
+    /// Whether a Slack conversation (not the list) is on screen.
+    pub(super) fn slack_conversation_shown(&self) -> bool {
+        self.slack_visible() && self.slack.open.is_some()
+    }
+
     fn slack_visible(&self) -> bool {
         self.chat.is_visible() && self.chat.page() == Page::Slack
     }
 }
 
-/// Credentials from the MEOW_SLACK_* variables, else the Keychain.
-fn load_credentials() -> Option<Credentials> {
-    env_credentials().or_else(|| keychain::load().ok().flatten())
+/// Credentials from the MEOW_SLACK_* variables, else the Keychain; `true`
+/// when they come from the Keychain.
+fn load_credentials() -> Option<(Credentials, bool)> {
+    env_credentials()
+        .map(|creds| (creds, false))
+        .or_else(|| keychain::load().ok().flatten().map(|creds| (creds, true)))
 }
 
 fn env_credentials() -> Option<Credentials> {
@@ -481,8 +574,10 @@ fn env_credentials() -> Option<Credentials> {
 }
 
 /// A message's text in Markdown, with what Slack shows besides text: attached
-/// files, a link or bot card summary, and a thread's reply count.
-fn message_body(message: &Message, names: &NameMap) -> String {
+/// images and files, a link or bot card summary, and a thread's reply count.
+/// With `draw_images`, each image is a marker the transcript swaps for the
+/// picture; otherwise it is named.
+fn message_body(message: &Message, names: &NameMap, draw_images: bool) -> String {
     let text = format::to_markdown(&message.text, names);
     let mut parts = Vec::new();
     if !text.trim().is_empty() {
@@ -490,6 +585,13 @@ fn message_body(message: &Message, names: &NameMap) -> String {
     } else if let Some(summary) = &message.attachment {
         parts.push(format!("_{}_", summary.trim()));
     }
+    parts.extend(message.images.iter().map(|image| {
+        if draw_images {
+            emoji_text::image_marker(&image.id)
+        } else {
+            format!("🖼 {}", image.title)
+        }
+    }));
     parts.extend(message.files.iter().map(|name| format!("📎 {name}")));
     match message.reply_count {
         0 => {}
@@ -500,6 +602,15 @@ fn message_body(message: &Message, names: &NameMap) -> String {
         parts.push("_(no text)_".to_string());
     }
     parts.join("\n")
+}
+
+/// Whether a message is for the user: any message in a direct or group
+/// message, or one that mentions them in a channel.
+fn is_for_me(kind: ChannelKind, text: &str, me: Option<&str>) -> bool {
+    match kind {
+        ChannelKind::Im | ChannelKind::Mpim => true,
+        ChannelKind::Channel => me.is_some_and(|me| text.contains(&format!("<@{me}>"))),
+    }
 }
 
 /// A readable title for a conversation.
@@ -536,6 +647,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn direct_messages_and_mentions_are_for_me() {
+        assert!(is_for_me(ChannelKind::Im, "hi", Some("U1")));
+        assert!(is_for_me(ChannelKind::Mpim, "hi all", None));
+        assert!(is_for_me(ChannelKind::Channel, "ping <@U1>", Some("U1")));
+        assert!(!is_for_me(ChannelKind::Channel, "ping <@U2>", Some("U1")));
+        assert!(!is_for_me(ChannelKind::Channel, "<@U1>", None));
+    }
+
+    #[test]
     fn mpim_name_is_prettified() {
         assert_eq!(
             prettify_mpim("mpdm-alice--bob--carol-1"),
@@ -558,6 +678,7 @@ mod tests {
             thread_ts: None,
             reply_count: 0,
             files: Vec::new(),
+            images: Vec::new(),
             attachment: None,
             bot_name: None,
         }
@@ -572,9 +693,28 @@ mod tests {
             ..message("see attached")
         };
         assert_eq!(
-            message_body(&msg, &names),
+            message_body(&msg, &names, true),
             "see attached\n📎 plan.pdf\n↳ 3 replies"
         );
+    }
+
+    #[test]
+    fn images_are_markers_in_the_transcript_and_names_elsewhere() {
+        let names = NameMap::default();
+        let msg = Message {
+            images: vec![meow::slack::model::SlackImage {
+                id: "F1".into(),
+                title: "Screenshot".into(),
+                thumb: "https://files.slack.com/F1/480.png".into(),
+                permalink: None,
+            }],
+            ..message("look")
+        };
+        assert_eq!(
+            message_body(&msg, &names, true),
+            format!("look\n{}", emoji_text::image_marker("F1"))
+        );
+        assert_eq!(message_body(&msg, &names, false), "look\n🖼 Screenshot");
     }
 
     #[test]
@@ -584,8 +724,8 @@ mod tests {
             attachment: Some("Build passed".into()),
             ..message("")
         };
-        assert_eq!(message_body(&card, &names), "_Build passed_");
-        assert_eq!(message_body(&message(""), &names), "_(no text)_");
+        assert_eq!(message_body(&card, &names, true), "_Build passed_");
+        assert_eq!(message_body(&message(""), &names, true), "_(no text)_");
     }
 
     #[test]

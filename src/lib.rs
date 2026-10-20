@@ -1,5 +1,7 @@
 pub mod action_results;
 pub mod actions;
+pub mod activity;
+pub mod agenda;
 pub mod agent;
 pub mod agent_run;
 pub mod behavior;
@@ -9,6 +11,8 @@ pub mod conversations;
 pub mod legacy;
 pub mod markdown;
 pub mod plan;
+pub mod routines;
+pub mod rsvp;
 pub mod schedule;
 pub mod settings;
 pub mod slack;

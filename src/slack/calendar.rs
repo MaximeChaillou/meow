@@ -25,6 +25,8 @@ pub struct CalendarTools {
     pub read: Vec<String>,
     /// Tools that create an event.
     pub create: Vec<String>,
+    /// Tools that answer an invitation (accept, decline).
+    pub respond: Vec<String>,
 }
 
 impl CalendarTools {
@@ -39,6 +41,8 @@ impl CalendarTools {
             }
             if is_create(&name) {
                 found.create.push(tool.clone());
+            } else if is_respond(&name) {
+                found.respond.push(tool.clone());
             } else if is_read(&name) {
                 found.read.push(tool.clone());
             }
@@ -57,6 +61,10 @@ fn is_create(name: &str) -> bool {
         .any(|word| name.contains(word));
     let event = ["event", "meeting"].iter().any(|word| name.contains(word));
     creates && event
+}
+
+fn is_respond(name: &str) -> bool {
+    ["respond", "rsvp"].iter().any(|word| name.contains(word))
 }
 
 /// Looks without changing: anything that edits, answers or removes is left out.
@@ -290,6 +298,7 @@ mod tests {
         CalendarTools {
             read: names(&["mcp__cal__list_events", "mcp__cal__suggest_time"]),
             create: names(&["mcp__cal__create_event"]),
+            respond: Vec::new(),
         }
     }
 
@@ -316,6 +325,10 @@ mod tests {
                 "mcp__claude_ai_Google_Calendar__list_events",
                 "mcp__claude_ai_Google_Calendar__suggest_time",
             ])
+        );
+        assert_eq!(
+            found.respond,
+            names(&["mcp__claude_ai_Google_Calendar__respond_to_event"])
         );
     }
 

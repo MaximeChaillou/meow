@@ -79,15 +79,20 @@ const GITHUB: (&str, &str) = (
 );
 const SLACK: (&str, &str) = (
     "Slack",
-    "DMs and threads or mentions since yesterday where I owe a reply.",
+    "DMs and threads or mentions since yesterday where I owe a reply. A later message of mine \
+     in the same DM or channel, in the thread or not, or a reaction, counts as a reply.",
 );
 const GMAIL: (&str, &str) = (
     "Gmail",
     "unread or important emails from the last day, and emails waiting for my answer.",
 );
 
-/// Morning planning runs by itself at this time.
+/// Today's planning runs by itself at this time.
 const MORNING_AT: DailyTime = DailyTime::new(7, 0);
+
+pub const TODAYS_PLANNING: &str = "Today's planning";
+/// The former title of Today's planning, whose saved result is carried over.
+pub const LEGACY_PLANNING: &str = "Morning planning";
 
 pub fn defaults() -> Vec<QuickAction> {
     vec![
@@ -95,7 +100,7 @@ pub fn defaults() -> Vec<QuickAction> {
             layout: Layout::Plan,
             daily_at: Some(MORNING_AT),
             ..QuickAction::new(
-                "Morning planning",
+                TODAYS_PLANNING,
                 &fan_out(
                     "Plan my day.",
                     &[
@@ -201,9 +206,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_offer_morning_planning_and_pending_tasks() {
+    fn defaults_offer_todays_planning_and_pending_tasks() {
         let titles: Vec<_> = defaults().into_iter().map(|a| a.title).collect();
-        assert_eq!(titles, ["Morning planning", "Pending tasks"]);
+        assert_eq!(titles, ["Today's planning", "Pending tasks"]);
     }
 
     #[test]
@@ -230,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn morning_planning_is_a_daily_plan_at_seven() {
+    fn todays_planning_is_a_daily_plan_at_seven() {
         let morning = &defaults()[0];
         assert_eq!(morning.layout, Layout::Plan);
         assert_eq!(morning.daily_at, Some(DailyTime::new(7, 0)));

@@ -40,8 +40,10 @@ usual Claude Code settings, MCP servers and skills.
 ## Look
 
 The chat opens as the cat's pixel-art speech bubble (drag it by its background,
-close it with Esc, the ✕, by clicking the cat, or just by clicking elsewhere). Text uses the VT323 pixel
-font, bundled in `assets/fonts` under the SIL Open Font License.
+close it with Esc, the ✕, by clicking the cat, or just by clicking elsewhere), dark
+with an 8-bit palette (Sweetie 16). Text uses three pixel fonts: VT323
+for messages, Silkscreen for labels and Press Start 2P for titles, bundled in
+`assets/fonts` under the SIL Open Font License.
 
 ## Build and run
 
@@ -69,7 +71,8 @@ the things you need to act on, click a task to open it (hovering shows it is cli
 talk about it in its own conversation, which remembers its Claude session
 across restarts. You can also type your own tasks. Re-running an action merges: new items are added and checked ones stay
 checked. Checking a task only ticks it here (nothing changes in Linear, Slack…),
-and done tasks disappear after a day. The list is saved in
+and done tasks leave the list for **See completed**, at the bottom, where they
+show when they were done and stay for 30 days. The list is saved in
 `~/Library/Application Support/Meow/tasks.json`.
 
 ### Background check
@@ -84,16 +87,20 @@ uses a little of your Claude plan.
 
 ### Quick actions
 
-The defaults are **Morning planning** (agenda, priorities, what needs a reply)
+The defaults are **Today's planning** (agenda, priorities, what needs a reply)
 and **Pending tasks** (Linear, GitHub reviews and PRs, Slack, Gmail). Both only
 read; they never send or change anything. Each source is checked by its own
 Claude sub-agent, in parallel, then the results are combined.
 
-**Morning planning runs by itself every day at 7:00**, or as soon as Meow is
+**Today's planning runs by itself every day at 7:00**, or as soon as Meow is
 running after that (Mac asleep, logged in late), in the background: the cat
 shows `!` when your plan is ready. It waits while you are using the chat, and a
-failed run is tried again 15 minutes later. Its result is a **plan page** rather
-than text: the date and a one-line summary, today's agenda (past events dimmed,
+failed run is tried again 15 minutes later. Through the day, the plan's agenda
+is kept current from your calendar every 15 minutes (`MEOW_AGENDA_MINUTES`, 0
+turns it off), by a quiet run that may only read the calendar. Invitations
+you have not answered show **Accept** and **Decline**: each click is a run that
+may only call the calendar's respond tool. Its result is a **plan page** rather
+than text: the date and a one-line summary, today's agenda (each event with how long it lasts and its meeting room, past events dimmed,
 the current one highlighted), the 3 things to focus on first with why, the
 replies you owe, and the rest for later. Every item is a task: tick it on the
 plan or in Tasks, click it to open its link. Type under the plan to ask about
@@ -105,7 +112,7 @@ result as a plan page:
 
 ```json
 [
-  { "title": "Morning planning", "prompt": "Plan my day from my calendar, Linear and Slack.",
+  { "title": "Today's planning", "prompt": "Plan my day from my calendar, Linear and Slack.",
     "daily_at": "07:30", "layout": "plan" },
   { "title": "Inbox triage", "prompt": "Summarize unread emails that need an answer. Only read." }
 ]
@@ -117,12 +124,45 @@ task list.
 They use the connectors of your Claude account (Slack, Google Calendar, Gmail,
 Linear, GitHub…). Sign in to them once with `/mcp` in Claude Code.
 
+### Activity
+
+The **Activity** page collects what happened while you were away: Slack DMs and
+mentions, calendar changes found by the agenda refresh (new, moved or cancelled
+events, new invitations, answers sent), tasks found or resolved by the
+background check, and scheduled tasks that ran or fired. Each new item also
+shows a macOS banner (the bundled app asks permission once; a `cargo run` build
+posts through `osascript`). Opening the page marks everything read; `×`
+dismisses one item, **Clear all** empties the list, and items go after 7 days.
+Clicking an item opens what it is about.
+
+### Scheduled tasks
+
+Ask in the chat for something later and Claude schedules it instead of doing it
+now:
+
+- **At a time**: "at 17:00, summarize my unread emails", "every day at 9:00,
+  list the PRs waiting for me". It runs at that time with the chat's
+  permissions.
+- **When something happens**: "when Staples replies to Cyril's email, let me
+  know". Claude checks every 10 minutes (or as asked), read-only, and when it
+  happens tells you with the details, or does what you asked.
+
+The **Scheduled** page lists them with their next run, what they do and their
+last result; `×` deletes one. Results land in Activity. Runs happen in the
+background, one at a time, and never block the chat.
+
 ### Slack
 
 The sidebar's **Slack** page (also right-click the cat › **Slack**, or ⌘L) is a
-live, two-way Slack chat, separate from Claude. It lists your direct and group
-messages (most recent first), opens one to read it, and lets you reply from the
-input. New messages arrive within a few seconds and the cat shows `!` when
+live, two-way Slack chat, separate from Claude. Two tabs list your **Direct**
+and group messages and your **Channels** (the ones in your Slack sidebar, most
+recent first), each with how many conversations have unread messages; open one
+to read it and reply from the input. Emoji show as emoji: standard
+`:shortcodes:` (with skin tones) and your workspace's custom ones, whose images
+are downloaded when first seen and cached in `~/Library/Caches/Meow/emoji`. Attached
+images show in the conversation too (their thumbnail, fetched with your session
+from `files.slack.com` only, cached in `~/Library/Caches/Meow/slack-files`);
+click one to open it in Slack. New messages arrive within a few seconds and the cat shows `!` when
 someone writes to you while you are elsewhere.
 
 **Sign-in uses no Slack app.** Click **Sign in to Slack** and log in with your
@@ -191,6 +231,11 @@ name (`~/Library/Application Support/Lazy`, `~/.config/lazy`) to the new folders
 cargo test                                  # behaviour, sprites, CLI stream parsing
 cargo run --example preview -- sprites.png  # render every pose to a PNG sheet
 ```
+
+To check the look of every page without screen access, run with
+`MEOW_SNAPSHOT_DIR=<folder>`: Meow opens the bubble, saves each page (Chat,
+Tasks, Plan, the Slack list, a conversation and Claude's panel, filled with
+sample messages) as a PNG there, then quits. Snapshots never connect to Slack.
 
 | File                       | Role                                                      |
 |----------------------------|-----------------------------------------------------------|

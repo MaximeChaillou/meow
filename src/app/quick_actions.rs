@@ -100,7 +100,7 @@ impl App {
         *self.conversations.get_mut(&ChatId::Action(index)) = fresh;
     }
 
-    /// "Morning planning · ran 2 h ago".
+    /// "Today's planning · ran 2 h ago".
     pub(super) fn action_title(&self, index: usize) -> String {
         let Some(action) = self.actions.get(index) else {
             return "Quick action".to_string();
@@ -148,7 +148,7 @@ impl App {
         self.save_action_results();
     }
 
-    fn save_action_results(&mut self) {
+    pub(super) fn save_action_results(&mut self) {
         let Some(path) = &self.results_path else {
             return;
         };
@@ -162,12 +162,27 @@ impl App {
 
 /// Saved results, or none plus the reason they could not be read. An
 /// unreadable file is reported and left untouched.
-pub(super) fn load_action_results() -> (ActionResults, Option<std::path::PathBuf>, Option<String>) {
+pub(super) fn load_action_results(
+    actions: &[QuickAction],
+) -> (ActionResults, Option<std::path::PathBuf>, Option<String>) {
     let Some(path) = action_results::default_path() else {
         return (ActionResults::default(), None, None);
     };
     match ActionResults::load(&path) {
-        Ok(results) => (results, Some(path), None),
+        Ok(mut results) => {
+            // Morning planning became Today's planning: keep its last plan,
+            // unless an action still goes by the old name.
+            if !actions
+                .iter()
+                .any(|a| a.title == meow::actions::LEGACY_PLANNING)
+            {
+                results.rename(
+                    meow::actions::LEGACY_PLANNING,
+                    meow::actions::TODAYS_PLANNING,
+                );
+            }
+            (results, Some(path), None)
+        }
         Err(error) => (
             ActionResults::default(),
             None,

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::plan::DayPlan;
+use crate::plan::{DayPlan, Event, Rsvp};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionResult {
@@ -50,11 +50,49 @@ impl ActionResults {
         );
     }
 
+    /// Moves the result saved under `from` to `to`, after an action is
+    /// renamed; nothing happens if `to` already has one.
+    pub fn rename(&mut self, from: &str, to: &str) {
+        if self.results.contains_key(to) {
+            return;
+        }
+        if let Some(result) = self.results.remove(from) {
+            self.results.insert(to.to_string(), result);
+        }
+    }
+
     /// Updates the session after a follow-up, keeping the result itself.
     pub fn set_session(&mut self, title: &str, session: &str) {
         if let Some(result) = self.results.get_mut(title) {
             result.session = Some(session.to_string());
         }
+    }
+
+    /// Replaces the agenda of a result's day plan, keeping the rest; `false`
+    /// when there is no plan to update.
+    pub fn set_agenda(&mut self, title: &str, agenda: Vec<Event>) -> bool {
+        let Some(result) = self.results.get_mut(title) else {
+            return false;
+        };
+        let Some(plan) = &result.plan else {
+            return false;
+        };
+        result.plan = Some(plan.with_agenda(agenda));
+        true
+    }
+
+    /// Records my answer to event `id` in every plan that has it; `false`
+    /// when none does.
+    pub fn set_response(&mut self, id: &str, response: Rsvp) -> bool {
+        let mut changed = false;
+        for result in self.results.values_mut() {
+            let Some(plan) = &result.plan else { continue };
+            if plan.agenda.iter().any(|e| e.id.as_deref() == Some(id)) {
+                result.plan = Some(plan.with_response(id, response));
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn load(path: &Path) -> Result<Self, String> {
@@ -134,6 +172,46 @@ mod tests {
             ("answer", Some("s2"))
         );
         assert!(results.get("Unknown").is_none());
+    }
+
+    #[test]
+    fn renaming_carries_the_result_over_unless_taken() {
+        let mut results = ActionResults::default();
+        results.record("Old", "old answer", None, None, 10);
+        results.rename("Old", "New");
+        assert!(results.get("Old").is_none());
+        assert_eq!(results.get("New").unwrap().answer, "old answer");
+        results.record("Old", "other", None, None, 20);
+        results.rename("Old", "New");
+        assert_eq!(results.get("New").unwrap().answer, "old answer");
+        assert!(results.get("Old").is_some());
+    }
+
+    #[test]
+    fn agenda_updates_keep_the_rest_of_the_result() {
+        let mut results = ActionResults::default();
+        results.record("Text", "answer", None, None, 10);
+        results.record("Plan", "answer", Some("s1"), Some(DayPlan::default()), 10);
+        let event = Event {
+            start: Some("09:30".into()),
+            end: None,
+            title: "Standup".into(),
+            url: None,
+            id: Some("e1".into()),
+            calendar: None,
+            location: None,
+            response: Some(Rsvp::NeedsAction),
+        };
+        assert!(!results.set_agenda("Text", vec![event.clone()]));
+        assert!(!results.set_agenda("Unknown", vec![event.clone()]));
+        assert!(results.set_agenda("Plan", vec![event.clone()]));
+        let result = results.get("Plan").unwrap();
+        assert_eq!(result.plan.as_ref().unwrap().agenda, [event]);
+        assert_eq!((result.ran_at, result.session.as_deref()), (10, Some("s1")));
+        assert!(results.set_response("e1", Rsvp::Accepted));
+        assert!(!results.set_response("other", Rsvp::Accepted));
+        let agenda = &results.get("Plan").unwrap().plan.as_ref().unwrap().agenda;
+        assert_eq!(agenda[0].response, Some(Rsvp::Accepted));
     }
 
     #[test]

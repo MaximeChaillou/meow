@@ -1,15 +1,22 @@
 //! Ties the cat, the chat bubble, the hotkey and Claude runs together.
 
+mod activity;
+mod agenda;
 mod agents;
 mod coat;
+mod downloads;
 mod plan;
 mod quick_actions;
 mod requests;
+mod routines;
+mod rsvp;
 mod schedule;
 mod slack;
 mod slack_assist;
 mod slack_calendar;
+mod slack_emoji;
 mod slack_voice;
+mod snapshot;
 mod sync;
 mod task_actions;
 
@@ -90,6 +97,8 @@ struct App {
     slack: slack::SlackState,
     /// The private Claude question about the open Slack conversation.
     slack_assist: slack_assist::SlackAssist,
+    /// The workspace's custom emoji, and their images once downloaded.
+    emoji: slack_emoji::EmojiState,
     /// The user's learned writing style, for Slack drafts.
     voice: slack_voice::VoiceState,
     /// The calendar tools of the user's Claude Code, for events from Slack.
@@ -98,12 +107,22 @@ struct App {
     sync: sync::SyncState,
     /// Daily quick actions.
     schedule: schedule::ScheduleState,
+    /// The refresh of today's plan agenda from the calendar.
+    agenda: agenda::AgendaState,
+    /// Invitation answers on their way to the calendar.
+    rsvp: rsvp::RsvpState,
+    /// What happened in the background, for the Activity page.
+    activity: activity::ActivityState,
+    /// Scheduled tasks and watches.
+    routines: routines::RoutineState,
     /// Coding agents started in Superset from the chat or Slack.
     agents: agents::AgentsState,
     /// A reply arrived out of sight; the cat shows `!` until it is seen.
     unread: bool,
     /// The conversation whose reply is waiting.
     unread_chat: ChatId,
+    /// Debug snapshots of each page, when `MEOW_SNAPSHOT_DIR` is set.
+    snapshot: Option<snapshot::Snapshot>,
     _hotkeys: Option<GlobalHotKeyManager>,
 }
 
@@ -122,6 +141,7 @@ pub fn start(mtm: MainThreadMarker) {
     let cat_window = CatWindow::new(mtm, &cat_menu);
     let prop_window = CatWindow::prop(mtm);
     let chat = ChatWindow::new(mtm, &controller, &actions);
+    chat.set_coat(settings.coat);
 
     let mut main = Transcript::default();
     let (hotkeys, hotkey_error) = match register_hotkey() {
@@ -132,8 +152,16 @@ pub fn start(mtm: MainThreadMarker) {
     main.info(&format!(
         "Click the cat or press {HOTKEY_LABEL} to talk. Right-click for options."
     ));
-    let (action_results, results_path, results_error) = quick_actions::load_action_results();
+    let (action_results, results_path, results_error) =
+        quick_actions::load_action_results(&actions);
+    let (activity_state, activity_error) = activity::ActivityState::load();
+    let (routine_state, routines_error) = routines::RoutineState::load();
+    chat.render_routines(&routine_state.routines, None, now_secs());
+    chat.render_activity(&activity_state.log, now_secs());
+    crate::ui::notify::request_permission();
     let startup_errors = [
+        &activity_error,
+        &routines_error,
         &fonts_error,
         &actions_error,
         &hotkey_error,
@@ -149,7 +177,7 @@ pub fn start(mtm: MainThreadMarker) {
         main.error(error);
     }
     let (task_list, tasks_path) = load_tasks(&mut main);
-    chat.render_tasks(&task_list);
+    chat.render_tasks(&task_list, now_secs());
     chat.chat().render(&main, true);
     let mut conversations = Conversations::default();
     conversations.get_mut(&ChatId::Main).transcript = main;
@@ -191,10 +219,16 @@ pub fn start(mtm: MainThreadMarker) {
         slack: slack::SlackState::new(),
         slack_assist: slack_assist::SlackAssist::default(),
         voice: slack_voice::VoiceState::load(),
+        emoji: slack_emoji::EmojiState::default(),
         calendar: slack_calendar::CalendarState::default(),
         sync: sync::SyncState::from_env(),
         schedule: schedule::ScheduleState::new(),
+        agenda: agenda::AgendaState::from_env(),
+        rsvp: rsvp::RsvpState::default(),
+        activity: activity_state,
+        routines: routine_state,
         agents: agents::AgentsState::default(),
+        snapshot: snapshot::Snapshot::from_env(),
         _hotkeys: hotkeys,
     };
     APP.with(|cell| cell.replace(Some(app)));
@@ -305,12 +339,17 @@ impl App {
         self.poll_discovery();
         self.poll_claude();
         self.poll_slack();
+        self.poll_emoji();
         self.poll_slack_assist();
         self.poll_voice();
         self.poll_calendar_probe();
         self.poll_sync();
         self.poll_schedule();
+        self.poll_agenda();
+        self.poll_rsvp();
+        self.poll_routines();
         self.poll_agents();
+        self.poll_snapshot();
         self.animate(dt);
     }
 
@@ -413,9 +452,20 @@ impl App {
             }
             UiEvent::AddTask => self.add_task(),
             UiEvent::ToggleTask(row) => self.toggle_task(row),
+            UiEvent::ToggleCompleted => {
+                self.chat.tasks().toggle_completed();
+                self.chat.render_tasks(&self.tasks, now_secs());
+            }
             UiEvent::OpenTask(row) => self.open_task(row),
             UiEvent::ChatAboutTask(row) => self.chat_about_task(row),
             UiEvent::ShowSlack => self.show_slack(),
+            UiEvent::SlackTab(tab) => self.show_slack_tab(tab),
+            UiEvent::ShowActivity => self.show_activity(),
+            UiEvent::OpenActivity(row) => self.open_activity(row),
+            UiEvent::DismissActivity(row) => self.dismiss_activity(row),
+            UiEvent::ClearActivity => self.clear_activity(),
+            UiEvent::ShowRoutines => self.show_routines(),
+            UiEvent::DeleteRoutine(row) => self.delete_routine(row),
             UiEvent::SignInSlack => self.sign_in_slack(),
             UiEvent::OpenSlackConversation(row) => self.open_slack_conversation(row),
             UiEvent::SlackBack => self.slack_back(),
@@ -433,6 +483,12 @@ impl App {
             UiEvent::TogglePlanItem(row) => self.toggle_plan_item(row),
             UiEvent::OpenPlanItem(row) => self.open_plan_item(row),
             UiEvent::OpenPlanLink(index) => self.open_plan_link(index),
+            UiEvent::AcceptPlanEvent(index) => {
+                self.answer_plan_event(index, meow::plan::Rsvp::Accepted)
+            }
+            UiEvent::DeclinePlanEvent(index) => {
+                self.answer_plan_event(index, meow::plan::Rsvp::Declined)
+            }
             UiEvent::ToggleSteps(turn) => self.toggle_steps(turn),
             UiEvent::Submit => self.submit(),
             UiEvent::Escape if self.run.is_some() => self.cancel_run(),
