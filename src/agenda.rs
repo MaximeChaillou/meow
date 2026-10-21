@@ -53,19 +53,24 @@ pub enum Change {
 }
 
 /// The changes from `old` to `new`, leaving out events already over at
-/// `now_minutes` and ones I declined. Events match by id when both have one,
-/// else by title.
+/// `now_minutes` and ones I declined. Events match by id or by title.
+///
+/// All-day events (a working location, an absence) only count as
+/// invitations: each refresh reads the calendar anew and reports them
+/// unevenly, so their coming and going is noise.
 pub fn changes(old: &[Event], new: &[Event], now_minutes: u32) -> Vec<Change> {
     let relevant = |event: &&Event| {
         event.state(now_minutes) != EventState::Past && event.response != Some(Rsvp::Declined)
     };
+    let timed = |event: &&Event| event.state(now_minutes) != EventState::AllDay;
     let mut found = Vec::new();
     for event in new.iter().filter(relevant) {
         let change = match old.iter().find(|before| same_event(before, event)) {
             None if event.response == Some(Rsvp::NeedsAction) => {
                 Some(Change::Invited(event.clone()))
             }
-            None => Some(Change::Added(event.clone())),
+            None if timed(&event) => Some(Change::Added(event.clone())),
+            None => None,
             Some(before) if before.start != event.start => Some(Change::Moved {
                 event: event.clone(),
                 from: before.start.clone(),
@@ -77,17 +82,18 @@ pub fn changes(old: &[Event], new: &[Event], now_minutes: u32) -> Vec<Change> {
     let cancelled = old
         .iter()
         .filter(relevant)
+        .filter(timed)
         .filter(|before| !new.iter().any(|event| same_event(before, event)))
         .map(|before| Change::Cancelled(before.clone()));
     found.extend(cancelled);
     found
 }
 
+/// Ids alone are not enough: a refresh may report one event under another id
+/// (a recurring event's instance id, say).
 fn same_event(a: &Event, b: &Event) -> bool {
-    match (&a.id, &b.id) {
-        (Some(x), Some(y)) => x == y,
-        _ => a.title.eq_ignore_ascii_case(&b.title),
-    }
+    let same_id = matches!((&a.id, &b.id), (Some(x), Some(y)) if x == y);
+    same_id || a.title.eq_ignore_ascii_case(&b.title)
 }
 
 #[cfg(test)]
@@ -150,6 +156,40 @@ mod tests {
             ..event(Some("y"), "Party", "18:00")
         };
         let new = vec![event(Some("s"), "standup", "09:30"), declined];
+        assert!(changes(&old, &new, 8 * 60).is_empty());
+    }
+
+    fn all_day(id: &str, title: &str, response: Option<Rsvp>) -> Event {
+        Event {
+            start: None,
+            response,
+            ..event(Some(id), title, "")
+        }
+    }
+
+    #[test]
+    fn all_day_events_coming_and_going_are_quiet() {
+        let office = all_day("o", "Office", None);
+        let standup = event(Some("a"), "Standup", "09:30");
+        let with = vec![office, standup.clone()];
+        let without = vec![standup];
+        assert!(changes(&with, &without, 8 * 60).is_empty());
+        assert!(changes(&without, &with, 8 * 60).is_empty());
+    }
+
+    #[test]
+    fn all_day_invitations_still_count() {
+        let invite = all_day("h", "Offsite", Some(Rsvp::NeedsAction));
+        assert_eq!(
+            changes(&[], std::slice::from_ref(&invite), 8 * 60),
+            [Change::Invited(invite)]
+        );
+    }
+
+    #[test]
+    fn an_event_reported_under_another_id_is_the_same_event() {
+        let old = vec![event(Some("abc"), "1:1", "14:00")];
+        let new = vec![event(Some("abc_20261021"), "1:1", "14:00")];
         assert!(changes(&old, &new, 8 * 60).is_empty());
     }
 
