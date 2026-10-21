@@ -84,6 +84,28 @@ pub struct Message {
     pub attachment: Option<String>,
     /// The name an app or bot posted under, when there is no `user`.
     pub bot_name: Option<String>,
+    /// Messages forwarded in this one, or unfurled from a link to them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forwarded: Vec<Forwarded>,
+}
+
+/// A message shown inside another: forwarded, or unfurled from its link.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Forwarded {
+    /// The original author, when a person.
+    pub user: Option<String>,
+    /// The author's name as Slack gave it, for when `user` is not resolved.
+    pub author: String,
+    /// The channel it was posted in, without `#`; `None` for a direct message.
+    pub channel: Option<String>,
+    /// Raw `mrkdwn`; render with [`super::format::to_markdown`].
+    pub text: String,
+    /// Names of attached files that are not images.
+    pub files: Vec<String>,
+    /// Attached images, drawn in the conversation.
+    pub images: Vec<SlackImage>,
+    /// The original message in Slack.
+    pub link: Option<String>,
 }
 
 /// An image attached to a message: its thumbnail, behind the session.
@@ -103,6 +125,13 @@ impl Message {
     /// Whether this message starts, or lives in, a thread.
     pub fn in_thread(&self) -> bool {
         self.thread_ts.is_some()
+    }
+
+    /// Its images, then those of the messages it forwards.
+    pub fn all_images(&self) -> impl Iterator<Item = &SlackImage> {
+        self.images
+            .iter()
+            .chain(self.forwarded.iter().flat_map(|f| &f.images))
     }
 }
 
@@ -495,6 +524,56 @@ struct RawAttachment {
     fallback: String,
     #[serde(default)]
     text: String,
+    /// Set on a forwarded message.
+    #[serde(default)]
+    is_share: bool,
+    /// Set on a message shown from a link to it, and on most forwards.
+    #[serde(default)]
+    is_msg_unfurl: bool,
+    #[serde(default)]
+    author_id: Option<String>,
+    #[serde(default)]
+    author_name: String,
+    #[serde(default)]
+    channel_name: String,
+    #[serde(default)]
+    from_url: Option<String>,
+    #[serde(default)]
+    files: Vec<RawFile>,
+}
+
+impl RawAttachment {
+    fn is_message(&self) -> bool {
+        self.is_share || self.is_msg_unfurl
+    }
+}
+
+impl From<RawAttachment> for Forwarded {
+    fn from(raw: RawAttachment) -> Self {
+        let (images, files) = split_files(raw.files);
+        Forwarded {
+            user: raw.author_id.filter(|id| !id.is_empty()),
+            author: raw.author_name,
+            channel: Some(raw.channel_name).filter(|name| !name.is_empty()),
+            text: raw.text,
+            files,
+            images,
+            link: raw.from_url.filter(|url| url.starts_with("https://")),
+        }
+    }
+}
+
+/// Splits files into the images to draw and the names of the others.
+fn split_files(files: Vec<RawFile>) -> (Vec<SlackImage>, Vec<String>) {
+    let (images, others): (Vec<_>, Vec<_>) =
+        files.into_iter().partition(|file| file.image().is_some());
+    let images = images.iter().filter_map(RawFile::image).collect();
+    let names = others
+        .into_iter()
+        .map(|file| first_non_empty([file.title, file.name]))
+        .filter(|name| !name.is_empty())
+        .collect();
+    (images, names)
 }
 
 #[derive(Deserialize)]
@@ -505,18 +584,13 @@ struct RawBotProfile {
 
 impl From<RawMessage> for Message {
     fn from(raw: RawMessage) -> Self {
-        let (images, others): (Vec<_>, Vec<_>) = raw
-            .files
-            .into_iter()
-            .partition(|file| file.image().is_some());
-        let images = images.iter().filter_map(RawFile::image).collect();
-        let files = others
-            .into_iter()
-            .map(|file| first_non_empty([file.title, file.name]))
-            .filter(|name| !name.is_empty())
-            .collect();
-        let attachment = raw
+        let (images, files) = split_files(raw.files);
+        let (forwarded, cards): (Vec<_>, Vec<_>) = raw
             .attachments
+            .into_iter()
+            .partition(RawAttachment::is_message);
+        let forwarded = forwarded.into_iter().map(Forwarded::from).collect();
+        let attachment = cards
             .into_iter()
             .map(|a| first_non_empty([a.title, a.fallback, a.text]))
             .find(|summary| !summary.is_empty());
@@ -536,6 +610,7 @@ impl From<RawMessage> for Message {
             images,
             attachment,
             bot_name,
+            forwarded,
         }
     }
 }
@@ -807,6 +882,59 @@ mod tests {
         assert_eq!(msg.files, ["Screenshot", "b.pdf"]);
         assert_eq!(msg.attachment.as_deref(), Some("Build passed"));
         assert_eq!(msg.bot_name.as_deref(), Some("CI"));
+    }
+
+    #[test]
+    fn forwarded_messages_are_kept_whole() {
+        let body = r#"{"ts":"2.0","user":"U1","text":"fyi","attachments":[
+            {"is_share":true,"is_msg_unfurl":true,"author_id":"U2","author_name":"Bob",
+             "channel_id":"C1","channel_name":"general","ts":"1.0",
+             "text":"ship it <@U3>","fallback":"[Oct 21] Bob: ship it",
+             "from_url":"https://x.slack.com/archives/C1/p1000",
+             "files":[
+                {"id":"F1","name":"shot.png","mimetype":"image/png",
+                 "thumb_480":"https://files.slack.com/F1/480.png"},
+                {"id":"F2","name":"notes.pdf","mimetype":"application/pdf"}]},
+            {"title":"Build passed"}]}"#;
+        let msg: Message = serde_json::from_str::<RawMessage>(body).unwrap().into();
+        assert_eq!(
+            msg.forwarded,
+            [Forwarded {
+                user: Some("U2".into()),
+                author: "Bob".into(),
+                channel: Some("general".into()),
+                text: "ship it <@U3>".into(),
+                files: vec!["notes.pdf".into()],
+                images: vec![SlackImage {
+                    id: "F1".into(),
+                    title: "shot.png".into(),
+                    thumb: "https://files.slack.com/F1/480.png".into(),
+                    permalink: None,
+                }],
+                link: Some("https://x.slack.com/archives/C1/p1000".into()),
+            }]
+        );
+        assert_eq!(msg.attachment.as_deref(), Some("Build passed"));
+        let ids: Vec<&str> = msg.all_images().map(|image| image.id.as_str()).collect();
+        assert_eq!(ids, ["F1"]);
+    }
+
+    #[test]
+    fn forwards_from_direct_messages_have_no_channel() {
+        let body = r#"{"ts":"2.0","attachments":[
+            {"is_share":true,"author_id":"U2","author_name":"Bob","text":"psst"}]}"#;
+        let msg: Message = serde_json::from_str::<RawMessage>(body).unwrap().into();
+        assert_eq!(msg.forwarded[0].channel, None);
+        assert_eq!(msg.forwarded[0].link, None);
+        assert_eq!(msg.attachment, None);
+    }
+
+    #[test]
+    fn cached_messages_without_forwards_still_load() {
+        let cached = r#"{"ts":"1.0","user":"U1","text":"hi","thread_ts":null,
+            "reply_count":0,"files":[],"attachment":null,"bot_name":null}"#;
+        let msg: Message = serde_json::from_str(cached).unwrap();
+        assert!(msg.forwarded.is_empty());
     }
 
     #[test]

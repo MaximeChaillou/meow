@@ -183,6 +183,7 @@ mod tests {
             images: Vec::new(),
             attachment: None,
             bot_name: None,
+            forwarded: Vec::new(),
         }
     }
 

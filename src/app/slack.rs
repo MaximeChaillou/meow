@@ -14,7 +14,7 @@ use meow::slack::cache::{self, SlackCache};
 use meow::slack::client::{Command, Event, SlackClient};
 use meow::slack::format::{self, NameMap};
 use meow::slack::keychain;
-use meow::slack::model::{Channel, ChannelKind, Message};
+use meow::slack::model::{Channel, ChannelKind, Forwarded, Message, SlackImage};
 use meow::slack::timeline::{self, Author, Entry};
 use meow::source::Source;
 
@@ -736,9 +736,9 @@ enum Shown {
 }
 
 /// A message's text in Markdown, with what Slack shows besides text: attached
-/// images and files, a link or bot card summary, and a thread's reply count.
-/// In the transcript each image is a marker swapped for the picture;
-/// elsewhere it is named.
+/// images and files, forwarded messages, a link or bot card summary, and a
+/// thread's reply count. In the transcript each image is a marker swapped for
+/// the picture; elsewhere it is named.
 fn message_body(message: &Message, names: &NameMap, shown: Shown) -> String {
     let text = format::to_markdown(&message.text, names);
     let mut parts = Vec::new();
@@ -747,11 +747,14 @@ fn message_body(message: &Message, names: &NameMap, shown: Shown) -> String {
     } else if let Some(summary) = &message.attachment {
         parts.push(format!("_{}_", summary.trim()));
     }
-    parts.extend(message.images.iter().map(|image| match shown {
-        Shown::Channel(_) | Shown::Thread => emoji_text::image_marker(&image.id),
-        Shown::Text => format!("🖼 {}", image.title),
-    }));
-    parts.extend(message.files.iter().map(|name| format!("📎 {name}")));
+    parts.extend(attached(&message.images, &message.files, shown));
+    // A blank line closes each quote, or what follows would join it.
+    parts.extend(
+        message
+            .forwarded
+            .iter()
+            .map(|forwarded| format!("{}\n", forwarded_quote(forwarded, names, shown))),
+    );
     let replies = match message.reply_count {
         0 => None,
         n => Some(format!("↳ {}", timeline::replies_label(n as usize))),
@@ -766,7 +769,50 @@ fn message_body(message: &Message, names: &NameMap, shown: Shown) -> String {
     if parts.is_empty() {
         parts.push("_(no text)_".to_string());
     }
-    parts.join("\n")
+    parts.join("\n").trim_end().to_string()
+}
+
+/// One line per attached image and file.
+fn attached(images: &[SlackImage], files: &[String], shown: Shown) -> Vec<String> {
+    images
+        .iter()
+        .map(|image| match shown {
+            Shown::Channel(_) | Shown::Thread => emoji_text::image_marker(&image.id),
+            Shown::Text => format!("🖼 {}", image.title),
+        })
+        .chain(files.iter().map(|name| format!("📎 {name}")))
+        .collect()
+}
+
+/// A forwarded message as a Markdown quote: who wrote it and where, then what
+/// it says and carries. In the transcript it links to the original.
+fn forwarded_quote(forwarded: &Forwarded, names: &NameMap, shown: Shown) -> String {
+    let author = forwarded
+        .user
+        .as_ref()
+        .and_then(|id| names.users.get(id))
+        .map(String::as_str)
+        .or(Some(forwarded.author.trim()).filter(|name| !name.is_empty()))
+        .unwrap_or("Someone");
+    let place = forwarded
+        .channel
+        .as_ref()
+        .map(|channel| format!(" in #{channel}"))
+        .unwrap_or_default();
+    let link = match (&forwarded.link, shown) {
+        (Some(url), Shown::Channel(_) | Shown::Thread) => format!(" · [Open in Slack]({url})"),
+        _ => String::new(),
+    };
+    let text = format::to_markdown(&forwarded.text, names);
+    std::iter::once(format!("↪ **{author}**{place}{link}"))
+        .chain(text.trim().lines().map(str::to_string))
+        .chain(attached(&forwarded.images, &forwarded.files, shown))
+        .map(|line| match line.trim_end() {
+            "" => ">".to_string(),
+            line => format!("> {line}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Whether a message is for the user: any message in a direct or group
@@ -846,6 +892,7 @@ mod tests {
             images: Vec::new(),
             attachment: None,
             bot_name: None,
+            forwarded: Vec::new(),
         }
     }
 
@@ -896,6 +943,81 @@ mod tests {
         assert_eq!(
             message_body(&msg, &names, Shown::Text),
             "look\n🖼 Screenshot"
+        );
+    }
+
+    fn forward() -> Forwarded {
+        Forwarded {
+            user: Some("U2".into()),
+            author: "Bob B".into(),
+            channel: Some("general".into()),
+            text: "ship it\n\ntoday".into(),
+            files: vec!["notes.pdf".into()],
+            images: vec![meow::slack::model::SlackImage {
+                id: "F1".into(),
+                title: "Screenshot".into(),
+                thumb: "https://files.slack.com/F1/480.png".into(),
+                permalink: None,
+            }],
+            link: Some("https://x.slack.com/archives/C1/p1000".into()),
+        }
+    }
+
+    #[test]
+    fn forwarded_messages_are_quoted_with_author_and_place() {
+        let mut names = NameMap::default();
+        names.users.insert("U2".to_string(), "bob".to_string());
+        let msg = Message {
+            forwarded: vec![forward()],
+            reply_count: 1,
+            ..message("fyi")
+        };
+        assert_eq!(
+            message_body(&msg, &names, Shown::Text),
+            "fyi\n> ↪ **bob** in #general\n> ship it\n>\n> today\n\
+             > 🖼 Screenshot\n> 📎 notes.pdf\n\n↳ 1 reply"
+        );
+    }
+
+    #[test]
+    fn forwarded_messages_link_to_the_original_in_the_transcript() {
+        let names = NameMap::default();
+        let msg = Message {
+            forwarded: vec![Forwarded {
+                text: String::new(),
+                files: Vec::new(),
+                ..forward()
+            }],
+            ..message("")
+        };
+        assert_eq!(
+            message_body(&msg, &names, Shown::Thread),
+            format!(
+                "> ↪ **Bob B** in #general · [Open in Slack](https://x.slack.com/archives/C1/p1000)\n> {}",
+                emoji_text::image_marker("F1")
+            )
+        );
+    }
+
+    #[test]
+    fn forwards_without_a_known_author_or_channel_still_read() {
+        let names = NameMap::default();
+        let bare = Forwarded {
+            user: None,
+            author: " ".into(),
+            channel: None,
+            text: "psst".into(),
+            files: Vec::new(),
+            images: Vec::new(),
+            link: None,
+        };
+        let msg = Message {
+            forwarded: vec![bare.clone(), bare],
+            ..message("")
+        };
+        assert_eq!(
+            message_body(&msg, &names, Shown::Channel(0)),
+            "> ↪ **Someone**\n> psst\n\n> ↪ **Someone**\n> psst"
         );
     }
 

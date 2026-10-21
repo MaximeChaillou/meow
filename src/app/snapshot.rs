@@ -204,6 +204,15 @@ fn sample_transcript() -> Vec<TranscriptItem> {
         ),
         run("Toi", "09:42", true, &["Oui, le matin m'arrange."]),
         run("Hugo", "09:42", false, &["Top, merci !"]),
+        run(
+            "Hugo",
+            "09:44",
+            false,
+            &["Pour contexte :\n\
+               > ↪ **Léa** in #android · [Open in Slack](https://example.slack.com/archives/C1/p1)\n\
+               > La 3.2 part en review demain, il reste le fix du crash au lancement.\n\
+               > 📎 crash-report.txt"],
+        ),
     ]
 }
 

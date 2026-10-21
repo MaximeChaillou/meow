@@ -64,7 +64,7 @@ impl App {
             }
         }
         if let Some(dir) = files_dir() {
-            for image in messages.iter().flat_map(|m| &m.images) {
+            for image in messages.iter().flat_map(Message::all_images) {
                 self.emoji
                     .images
                     .entry(image.id.clone())
