@@ -11,6 +11,7 @@ pub mod link_button;
 pub mod menus;
 pub mod news_bubble;
 pub mod notify;
+pub mod picture;
 pub mod plan_page;
 pub mod pointer;
 pub mod rich_text;

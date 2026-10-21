@@ -370,6 +370,7 @@ impl App {
         self.poll_claude();
         self.poll_slack();
         self.poll_emoji();
+        self.animate_slack();
         self.poll_slack_assist();
         self.poll_voice();
         self.poll_calendar_probe();

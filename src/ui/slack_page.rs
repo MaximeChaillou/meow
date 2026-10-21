@@ -8,13 +8,14 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::time::Instant;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AllocAnyThread, MainThreadMarker, MainThreadOnly, sel};
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSButton, NSScrollView, NSTextAlignment, NSTextField, NSTextView,
-    NSView, NSWindow,
+    NSAttachmentAttributeName, NSAutoresizingMaskOptions, NSButton, NSScrollView, NSTextAlignment,
+    NSTextAttachment, NSTextField, NSTextView, NSView, NSWindow,
 };
 use objc2_foundation::{
     NSAttributedString, NSMutableAttributedString, NSPoint, NSRange, NSRect, NSSize, NSString,
@@ -22,7 +23,7 @@ use objc2_foundation::{
 
 use super::bubble;
 use super::controller::Controller;
-use super::emoji_text::{self, EmojiGlyph, ImageGlyph};
+use super::emoji_text::{self, Animated, EmojiGlyph, ImageGlyph};
 use super::flipped::FlippedView;
 use super::link_button::LinkButton;
 use super::rich_text::{self, Attributes};
@@ -93,6 +94,13 @@ pub enum TranscriptItem {
     },
 }
 
+/// An animated picture in the transcript: where it is, and the frame shown.
+struct Playing {
+    animated: Animated,
+    range: NSRange,
+    frame: usize,
+}
+
 pub struct SlackPage {
     pub view: Retained<NSView>,
     /// Shown signed out: a prompt and a sign-in button.
@@ -106,6 +114,9 @@ pub struct SlackPage {
     transcript: Retained<NSTextView>,
     input: Retained<widgets::GrowingField>,
     send: Retained<NSButton>,
+    /// Animated emoji and images in the transcript, and when they started.
+    playing: RefCell<Vec<Playing>>,
+    clock: Instant,
     /// Asks Claude privately about the conversation, with the typed question.
     ask: Retained<NSButton>,
     /// Has Claude research and draft the reply, with the user's tools.
@@ -364,6 +375,8 @@ impl SlackPage {
             list,
             convo_scroll,
             transcript,
+            playing: RefCell::new(Vec::new()),
+            clock: Instant::now(),
             input,
             send,
             ask,
@@ -551,6 +564,7 @@ impl SlackPage {
             ));
         let text = NSMutableAttributedString::new();
         let mut focused = None;
+        let mut animated = Vec::new();
         for item in items {
             let piece = match item {
                 TranscriptItem::Day(label) => rich_text::slack_day(label),
@@ -567,8 +581,8 @@ impl SlackPage {
                 NSMutableAttributedString::alloc(),
                 &piece,
             );
-            emoji_text::insert(&piece, emoji);
-            emoji_text::insert_images(&piece, images);
+            emoji_text::insert(&piece, emoji, &mut animated);
+            emoji_text::insert_images(&piece, images, &mut animated);
             if matches!(item, TranscriptItem::Run { focus: Some(_), .. }) {
                 focused = Some(NSRange::new(text.length(), piece.length()));
             }
@@ -577,6 +591,7 @@ impl SlackPage {
         // SAFETY: the text view always owns a text storage.
         if let Some(storage) = unsafe { self.transcript.textStorage() } {
             storage.setAttributedString(&text);
+            self.playing.replace(placed(&storage, animated));
             // Lay everything out first: an image's height is only known once
             // laid out, and scrolling before that stops short of the end.
             // SAFETY: a text view built by AppKit owns its layout manager and container.
@@ -595,6 +610,24 @@ impl SlackPage {
             // run at the top, with what followed it below.
             if let Some(range) = focused {
                 self.transcript.scrollRangeToVisible(range);
+            }
+        }
+    }
+
+    /// Shows the current frame of each animated picture in the transcript;
+    /// called on every tick while the conversation is shown.
+    pub fn animate(&self) {
+        let elapsed = self.clock.elapsed().as_secs_f64();
+        // SAFETY: a text view built by AppKit owns its layout manager.
+        let Some(layout) = (unsafe { self.transcript.layoutManager() }) else {
+            return;
+        };
+        for playing in self.playing.borrow_mut().iter_mut() {
+            let (frame, image) = playing.animated.picture.frame_at(elapsed);
+            if frame != playing.frame {
+                playing.frame = frame;
+                playing.animated.attachment.setImage(Some(image));
+                layout.invalidateDisplayForCharacterRange(playing.range);
             }
         }
     }
@@ -731,6 +764,46 @@ impl SlackPage {
         label.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
         card.addSubview(&label);
     }
+}
+
+/// Each of `animated` with where its attachment sits in `text`.
+fn placed(text: &NSAttributedString, animated: Vec<Animated>) -> Vec<Playing> {
+    if animated.is_empty() {
+        return Vec::new();
+    }
+    let string = text.string().to_string();
+    let mut found = Vec::new();
+    // Attachments stand on U+FFFC; positions are UTF-16 offsets.
+    for (location, unit) in string.encode_utf16().enumerate() {
+        if unit != 0xFFFC {
+            continue;
+        }
+        // SAFETY: `location` is inside the text; the attachment key holds an NSTextAttachment.
+        let attachment = unsafe {
+            text.attribute_atIndex_effectiveRange(
+                NSAttachmentAttributeName,
+                location,
+                std::ptr::null_mut(),
+            )
+        }
+        .and_then(|value| value.downcast::<NSTextAttachment>().ok());
+        if let Some(attachment) = attachment {
+            found.push((attachment, NSRange::new(location, 1)));
+        }
+    }
+    animated
+        .into_iter()
+        .filter_map(|animated| {
+            let (_, range) = found.iter().find(|(attachment, _)| {
+                Retained::as_ptr(attachment) == Retained::as_ptr(&animated.attachment)
+            })?;
+            Some(Playing {
+                range: *range,
+                animated,
+                frame: 0,
+            })
+        })
+        .collect()
 }
 
 /// A conversation name after a green square when unread; bold for unread,

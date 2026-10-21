@@ -5,14 +5,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use meow::slack::emoji::{self, Custom};
 use meow::slack::model::Message;
-use objc2::AllocAnyThread;
-use objc2_app_kit::NSImage;
-use objc2_foundation::NSString;
 
 use crate::ui::emoji_text::{EmojiGlyph, ImageGlyph};
+use crate::ui::picture::Picture;
 
 use super::App;
 use super::downloads::{Download, Downloader};
@@ -102,7 +101,7 @@ impl App {
             return;
         }
         for (key, result) in finished {
-            let image = result.and_then(|file| load_image(&file));
+            let image = result.and_then(|file| Picture::load(&file)).map(Rc::new);
             match (key.strip_prefix(IMAGE_KEY), image) {
                 (Some(id), Ok(image)) => {
                     if let Some(glyph) = self.emoji.images.get_mut(id) {
@@ -119,11 +118,13 @@ impl App {
             self.render_slack();
         }
     }
-}
 
-fn load_image(file: &std::path::Path) -> Result<objc2::rc::Retained<NSImage>, String> {
-    let path = NSString::from_str(&file.to_string_lossy());
-    NSImage::initWithContentsOfFile(NSImage::alloc(), &path).ok_or("not an image".to_string())
+    /// Plays the animated emoji and images of the open conversation.
+    pub(super) fn animate_slack(&self) {
+        if self.slack_conversation_shown() {
+            self.chat.slack().animate();
+        }
+    }
 }
 
 /// `~/Library/Caches/Meow/slack-files`.

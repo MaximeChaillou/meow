@@ -453,6 +453,11 @@ struct RawFile {
     thumb_480: Option<String>,
     #[serde(default)]
     thumb_360: Option<String>,
+    /// Animated thumbnails, on a GIF; the plain ones are its first frame.
+    #[serde(default)]
+    thumb_480_gif: Option<String>,
+    #[serde(default)]
+    thumb_360_gif: Option<String>,
     #[serde(default)]
     permalink: Option<String>,
 }
@@ -463,11 +468,16 @@ impl RawFile {
         if !self.mimetype.starts_with("image/") || self.id.is_empty() {
             return None;
         }
-        let thumb = self
-            .thumb_480
-            .clone()
-            .or_else(|| self.thumb_360.clone())
-            .filter(|url| url.starts_with("https://"))?;
+        let thumb = [
+            &self.thumb_480_gif,
+            &self.thumb_360_gif,
+            &self.thumb_480,
+            &self.thumb_360,
+        ]
+        .into_iter()
+        .flatten()
+        .find(|url| url.starts_with("https://"))?
+        .clone();
         Some(SlackImage {
             id: self.id.clone(),
             title: first_non_empty([self.title.clone(), self.name.clone()]),
@@ -770,6 +780,21 @@ mod tests {
         assert_eq!(msg.images[0].thumb, "https://files.slack.com/F1/480.png");
         assert_eq!(msg.images[0].title, "Screenshot");
         assert_eq!(msg.files, ["notes.pdf", "huge.png"]);
+    }
+
+    #[test]
+    fn gifs_keep_their_animated_thumbnail() {
+        let body = r#"{"ts":"1.0","files":[
+            {"id":"F1","name":"party.gif","mimetype":"image/gif",
+             "thumb_480":"https://files.slack.com/F1/480.png",
+             "thumb_360_gif":"https://files.slack.com/F1/360.gif",
+             "thumb_480_gif":"https://files.slack.com/F1/480.gif"},
+            {"id":"F2","name":"small.gif","mimetype":"image/gif",
+             "thumb_360":"https://files.slack.com/F2/360.png",
+             "thumb_360_gif":"https://files.slack.com/F2/360.gif"}]}"#;
+        let msg: Message = serde_json::from_str::<RawMessage>(body).unwrap().into();
+        assert_eq!(msg.images[0].thumb, "https://files.slack.com/F1/480.gif");
+        assert_eq!(msg.images[1].thumb, "https://files.slack.com/F2/360.gif");
     }
 
     #[test]

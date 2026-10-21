@@ -1,9 +1,11 @@
 //! Pictures in the Slack transcript: `:name:` left in a message becomes the
 //! workspace's custom emoji, drawn inline at text size (or the standard emoji
 //! a custom name is an alias of), and an attached image's marker becomes the
-//! image itself, on its own line.
+//! image itself, on its own line. Animated ones are handed back with their
+//! attachment, for the page to play.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use meow::slack::emoji;
 use objc2::AllocAnyThread;
@@ -16,6 +18,7 @@ use objc2_foundation::{
     NSAttributedString, NSMutableAttributedString, NSPoint, NSRange, NSRect, NSSize, NSString,
 };
 
+use super::picture::Picture;
 use super::theme;
 
 /// How tall an emoji image is next to text of the font's size.
@@ -29,14 +32,14 @@ const MARK_CLOSE: &str = "⟧";
 
 /// What a custom emoji name is drawn as.
 pub enum EmojiGlyph {
-    Image(Retained<NSImage>),
+    Image(Rc<Picture>),
     /// An alias of a standard emoji.
     Text(String),
 }
 
 /// An image attached to a message: drawn once downloaded, named until then.
 pub struct ImageGlyph {
-    pub image: Option<Retained<NSImage>>,
+    pub image: Option<Rc<Picture>>,
     pub title: String,
     /// The file in Slack; clicking the image opens it.
     pub link: Option<String>,
@@ -47,9 +50,33 @@ pub fn image_marker(id: &str) -> String {
     format!("{MARK_OPEN}{id}{MARK_CLOSE}")
 }
 
+/// An attachment drawing an animated picture, whose frames it should cycle.
+pub struct Animated {
+    pub attachment: Retained<NSTextAttachment>,
+    pub picture: Rc<Picture>,
+}
+
+/// Notes `attachment` in `animated` when `picture` has frames to play.
+fn track(
+    animated: &mut Vec<Animated>,
+    attachment: &Retained<NSTextAttachment>,
+    picture: &Rc<Picture>,
+) {
+    if picture.is_animated() {
+        animated.push(Animated {
+            attachment: attachment.clone(),
+            picture: picture.clone(),
+        });
+    }
+}
+
 /// Swaps each image marker of `text` for its image, or its name while it
-/// loads (or when unknown).
-pub fn insert_images(text: &NSMutableAttributedString, images: &HashMap<String, ImageGlyph>) {
+/// loads (or when unknown). Animated images are added to `animated`.
+pub fn insert_images(
+    text: &NSMutableAttributedString,
+    images: &HashMap<String, ImageGlyph>,
+    animated: &mut Vec<Animated>,
+) {
     let string = text.string().to_string();
     let mut marks = Vec::new();
     let mut from = 0;
@@ -71,8 +98,9 @@ pub fn insert_images(text: &NSMutableAttributedString, images: &HashMap<String, 
             unsafe { text.attributesAtIndex_effectiveRange(location, std::ptr::null_mut()) };
         let glyph = images.get(id);
         let piece = match glyph.and_then(|g| g.image.as_ref()) {
-            Some(image) => {
-                let attachment = fitted_attachment(image);
+            Some(picture) => {
+                let attachment = fitted_attachment(picture.still());
+                track(animated, &attachment, picture);
                 NSMutableAttributedString::initWithAttributedString(
                     NSMutableAttributedString::alloc(),
                     &NSAttributedString::attributedStringWithAttachment(&attachment),
@@ -121,8 +149,12 @@ fn fitted_attachment(image: &NSImage) -> Retained<NSTextAttachment> {
 }
 
 /// Replaces each `:name:` of `text` found in `glyphs`, keeping the text's
-/// look (font, paragraph indent) around it.
-pub fn insert(text: &NSMutableAttributedString, glyphs: &HashMap<String, EmojiGlyph>) {
+/// look (font, paragraph indent) around it. Animated emoji are added to `animated`.
+pub fn insert(
+    text: &NSMutableAttributedString,
+    glyphs: &HashMap<String, EmojiGlyph>,
+    animated: &mut Vec<Animated>,
+) {
     if glyphs.is_empty() {
         return;
     }
@@ -146,13 +178,14 @@ pub fn insert(text: &NSMutableAttributedString, glyphs: &HashMap<String, EmojiGl
                     Some(&attributes),
                 )
             },
-            EmojiGlyph::Image(image) => {
+            EmojiGlyph::Image(picture) => {
                 // SAFETY: the font attribute, when set, holds an NSFont.
                 let font = unsafe { attributes.objectForKey(NSFontAttributeName) }
                     .and_then(|font| font.downcast::<NSFont>().ok());
                 let size = font.as_ref().map_or(theme::BODY_SIZE, |f| f.pointSize());
                 let descender = font.as_ref().map_or(-3.0, |f| f.descender());
-                let attachment = image_attachment(image, size * IMAGE_SCALE, descender);
+                let attachment = image_attachment(picture.still(), size * IMAGE_SCALE, descender);
+                track(animated, &attachment, picture);
                 let piece = NSMutableAttributedString::initWithAttributedString(
                     NSMutableAttributedString::alloc(),
                     &NSAttributedString::attributedStringWithAttachment(&attachment),

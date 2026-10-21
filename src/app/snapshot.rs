@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use meow::sprites::{self, Bubble, Facing, Look, Pose};
@@ -14,6 +15,7 @@ use meow::transcript::Transcript;
 
 use crate::ui::emoji_text::{self, ImageGlyph};
 use crate::ui::events::UiEvent;
+use crate::ui::picture::Picture;
 use crate::ui::rich_text;
 use crate::ui::slack_assist::AssistView;
 use crate::ui::slack_page::{ConversationRow, TranscriptItem};
@@ -285,7 +287,7 @@ fn sample_images() -> HashMap<String, ImageGlyph> {
     };
     let frame = sprites::render(&look, Default::default());
     let glyph = ImageGlyph {
-        image: Some(widgets::pixel_image(&frame, 8.0)),
+        image: Some(Rc::new(Picture::new(widgets::pixel_image(&frame, 8.0)))),
         title: "build.png".to_string(),
         link: None,
     };
