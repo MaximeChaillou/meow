@@ -72,7 +72,10 @@ pub enum UiEvent {
     OpenSlackConversation(usize),
     /// Show the Slack list's tab of direct messages, or of channels.
     SlackTab(crate::ui::slack_page::SlackTab),
-    /// Go back from a Slack conversation to the list.
+    /// Open the thread of the open Slack conversation's message at this index.
+    OpenSlackThread(usize),
+    /// Go back from a Slack thread to its conversation, or from a
+    /// conversation to the list.
     SlackBack,
     /// Send the reply typed in the open Slack conversation.
     SendSlack,

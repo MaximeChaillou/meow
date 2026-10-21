@@ -18,6 +18,10 @@ pub const ALL_TYPES: &str = "im,mpim,public_channel,private_channel";
 const SEARCH_PAGE_SIZE: &str = "100";
 /// How many messages to load for a conversation at once.
 pub const HISTORY_LIMIT: u16 = 50;
+/// Replies per `conversations.replies` page.
+const REPLIES_PAGE_SIZE: &str = "200";
+/// A thread is cut off after this many pages of replies.
+const MAX_REPLY_PAGES: usize = 5;
 
 /// Why an API call did not yield data.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -118,15 +122,35 @@ impl<H: Http> SlackApi<H> {
             .map_err(ApiError::Slack)
     }
 
-    /// The replies in a thread, oldest-first (includes the parent).
+    /// A thread: its parent, then the replies oldest-first, following
+    /// pagination up to [`MAX_REPLY_PAGES`].
     pub fn replies(&self, channel: &str, thread_ts: &str) -> Result<Vec<Message>, ApiError> {
-        let body = self.call(
-            "conversations.replies",
-            &[("channel", channel), ("ts", thread_ts)],
-        )?;
-        model::parse_messages(&body)
-            .map(|page| page.items)
-            .map_err(ApiError::Slack)
+        let mut all: Vec<Message> = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_REPLY_PAGES {
+            let mut params = vec![
+                ("channel", channel),
+                ("ts", thread_ts),
+                ("limit", REPLIES_PAGE_SIZE),
+            ];
+            if let Some(cursor) = cursor.as_deref() {
+                params.push(("cursor", cursor));
+            }
+            let body = self.call("conversations.replies", &params)?;
+            let page = model::parse_replies(&body).map_err(ApiError::Slack)?;
+            // Each page may lead with the parent again.
+            let fresh: Vec<Message> = page
+                .items
+                .into_iter()
+                .filter(|message| !all.iter().any(|seen| seen.ts == message.ts))
+                .collect();
+            all.extend(fresh);
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        Ok(all)
     }
 
     /// Unread state and latest activity of the direct and group conversations
@@ -378,6 +402,29 @@ mod tests {
         let messages = api.history("D1", 50).unwrap();
         assert_eq!(messages[0].text, "a");
         assert_eq!(messages[1].text, "b");
+    }
+
+    #[test]
+    fn replies_are_parent_first_across_pages() {
+        let page1 = r#"{"ok":true,"messages":[
+            {"ts":"1.0","text":"parent","thread_ts":"1.0","reply_count":2},
+            {"ts":"2.0","text":"a","thread_ts":"1.0"}],
+            "response_metadata":{"next_cursor":"c2"}}"#;
+        // Later pages may repeat the parent; it is kept once.
+        let page2 = r#"{"ok":true,"messages":[
+            {"ts":"1.0","text":"parent","thread_ts":"1.0","reply_count":2},
+            {"ts":"3.0","text":"b","thread_ts":"1.0"}]}"#;
+        let api = api(FakeHttp::with(&[page1, page2]));
+        let messages = api.replies("C1", "1.0").unwrap();
+        let texts: Vec<&str> = messages.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(texts, ["parent", "a", "b"]);
+        let calls = api.http.calls.borrow();
+        assert_eq!(
+            calls[0].url,
+            "https://acme.slack.com/api/conversations.replies"
+        );
+        assert!(calls[0].params.contains(&("ts".into(), "1.0".into())));
+        assert!(calls[1].params.contains(&("cursor".into(), "c2".into())));
     }
 
     #[test]

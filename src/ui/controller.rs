@@ -314,14 +314,19 @@ define_class!(
     }
 
     unsafe impl NSTextViewDelegate for Controller {
-        /// Clicks on a reply's "N steps" line fold or unfold it; other links open normally.
+        /// Clicks on a reply's "N steps" line fold or unfold it, and on a Slack
+        /// message's reply count open its thread; other links open normally.
         #[unsafe(method(textView:clickedOnLink:atIndex:))]
         fn clicked_on_link(&self, _view: &NSTextView, link: &AnyObject, _index: usize) -> Bool {
             // SAFETY: links are NSURL or NSString, and both describe themselves as the URL text.
             let url: Retained<NSString> = unsafe { msg_send![link, description] };
-            match rich_text::steps_turn(&url.to_string()) {
-                Some(turn) => {
-                    push(UiEvent::ToggleSteps(turn));
+            let url = url.to_string();
+            let event = rich_text::steps_turn(&url)
+                .map(UiEvent::ToggleSteps)
+                .or_else(|| rich_text::thread_index(&url).map(UiEvent::OpenSlackThread));
+            match event {
+                Some(event) => {
+                    push(event);
                     Bool::YES
                 }
                 None => Bool::NO,

@@ -19,6 +19,7 @@ use meow::slack::timeline::{self, Author, Entry};
 use meow::source::Source;
 
 use crate::ui::emoji_text;
+use crate::ui::rich_text;
 use crate::ui::sidebar::Page;
 use crate::ui::signin::SignIn;
 use crate::ui::slack_page::{ConversationRow, SlackTab, TranscriptItem};
@@ -59,6 +60,10 @@ pub struct SlackState {
     /// The open conversation and its messages.
     open: Option<String>,
     messages: Vec<Message>,
+    /// The thread open in that conversation (its parent's `ts`), and its
+    /// messages: the parent, then the replies.
+    thread: Option<String>,
+    thread_messages: Vec<Message>,
     /// The message to scroll to and mark in the open conversation, as `ts`
     /// values, best first (the message, then its thread); empty for the latest.
     focus: Vec<String>,
@@ -125,6 +130,7 @@ impl SlackState {
             self.channels.clear();
             self.messages.clear();
             self.open = None;
+            self.close_thread();
             self.names = NameMap::default();
         }
         self.cache_dirty |= before != self.cache.owner;
@@ -177,11 +183,39 @@ impl SlackState {
             .collect()
     }
 
-    /// The open conversation, grouped into days and author runs, with names
-    /// resolved and bodies in Markdown.
+    /// The messages on screen: the open thread's, else the conversation's.
+    fn shown(&self) -> &[Message] {
+        match self.thread {
+            Some(_) => &self.thread_messages,
+            None => &self.messages,
+        }
+    }
+
+    /// Leaves the open thread, if any, for its conversation.
+    fn close_thread(&mut self) {
+        self.thread = None;
+        self.thread_messages.clear();
+    }
+
+    /// The open conversation or thread, grouped into days and author runs,
+    /// with names resolved and bodies in Markdown.
     fn rendered(&self, now: u64) -> Vec<TranscriptItem> {
-        let focus = timeline::first_loaded(&self.messages, &self.focus);
-        timeline::timeline(&self.messages, now)
+        let shown = self.shown();
+        let focus = timeline::first_loaded(shown, &self.focus);
+        let entries = match self.thread {
+            Some(_) => timeline::thread(shown, now),
+            None => timeline::timeline(shown, now),
+        };
+        let place = |message: &Message| match self.thread {
+            Some(_) => Shown::Thread,
+            None => Shown::Channel(
+                shown
+                    .iter()
+                    .position(|m| m.ts == message.ts)
+                    .unwrap_or_default(),
+            ),
+        };
+        entries
             .into_iter()
             .map(|entry| match entry {
                 Entry::Day(label) => TranscriptItem::Day(label),
@@ -202,20 +236,25 @@ impl SlackState {
                         .position(|message| Some(message.ts.as_str()) == focus),
                     bodies: messages
                         .into_iter()
-                        .map(|message| message_body(message, &self.names, true))
+                        .map(|message| message_body(message, &self.names, place(message)))
                         .collect(),
                 },
             })
             .collect()
     }
 
-    /// The title of the open conversation.
+    /// The title of the open conversation, or of its open thread.
     fn open_title(&self) -> String {
-        self.open
+        let title = self
+            .open
             .as_ref()
             .and_then(|id| self.channels.iter().find(|c| &c.id == id))
             .map(|channel| channel_title(channel, &self.names))
-            .unwrap_or_else(|| "Slack".to_string())
+            .unwrap_or_else(|| "Slack".to_string());
+        match self.thread {
+            Some(_) => format!("Thread in {title}"),
+            None => title,
+        }
     }
 
     /// Hands `command` to the worker; `false` when not connected.
@@ -243,7 +282,7 @@ impl SlackState {
     pub(super) fn assist_context(&self) -> Option<AssistContext> {
         let channel = self.open.clone()?;
         let lines = self
-            .messages
+            .shown()
             .iter()
             .map(|message| Line {
                 ts: message.ts.clone(),
@@ -251,7 +290,7 @@ impl SlackState {
                     (None, Some(bot)) => bot.clone(),
                     (user, _) => self.name_of(user.as_deref()),
                 },
-                text: message_body(message, &self.names, false),
+                text: message_body(message, &self.names, Shown::Text),
             })
             .collect();
         Some(AssistContext {
@@ -317,16 +356,63 @@ impl App {
         self.open_slack_at(id, Vec::new());
     }
 
-    /// Opens conversation `id` scrolled to message `ts` and marked, or to
-    /// its thread when that reply is not among the conversation's messages.
+    /// Opens conversation `id` scrolled to message `ts` and marked. A reply in
+    /// a thread opens that thread instead, over the conversation scrolled to
+    /// the parent.
     pub(super) fn open_slack_message(&mut self, id: String, ts: String, thread_ts: Option<String>) {
-        let focus = std::iter::once(ts).chain(thread_ts).collect();
-        self.open_slack_at(id, focus);
+        match thread_ts.filter(|parent| *parent != ts) {
+            Some(parent) => {
+                self.open_slack_at(id, vec![parent.clone()]);
+                self.show_slack_thread(parent, vec![ts]);
+            }
+            None => self.open_slack_at(id, vec![ts]),
+        }
+    }
+
+    /// Opens the thread of the open conversation's message at `index` (as
+    /// last rendered), when it starts one.
+    pub(super) fn open_slack_thread(&mut self, index: usize) {
+        let parent = self
+            .slack
+            .messages
+            .get(index)
+            .filter(|message| message.reply_count > 0)
+            .map(|message| message.thread_ts.clone().unwrap_or(message.ts.clone()));
+        if let Some(parent) = parent {
+            self.show_slack_thread(parent, Vec::new());
+        }
+    }
+
+    /// Shows thread `parent` of the open conversation, scrolled to `focus`
+    /// (as `ts` values, best first) or to its latest reply.
+    fn show_slack_thread(&mut self, parent: String, focus: Vec<String>) {
+        let Some(channel) = self.slack.open.clone() else {
+            return;
+        };
+        self.close_slack_assist();
+        // The parent at once, until Slack sends the replies.
+        self.slack.thread_messages = self
+            .slack
+            .messages
+            .iter()
+            .filter(|message| message.ts == parent)
+            .cloned()
+            .collect();
+        self.slack.thread = Some(parent.clone());
+        self.slack.focus = focus;
+        self.render_slack();
+        if let Some(client) = &self.slack.client {
+            client.send(Command::OpenThread {
+                channel,
+                thread_ts: parent,
+            });
+        }
     }
 
     fn open_slack_at(&mut self, id: String, focus: Vec<String>) {
         self.close_slack_assist();
         self.slack.open = Some(id.clone());
+        self.slack.close_thread();
         self.slack.focus = focus;
         self.read_slack_activity(&id);
         // What was last seen, until Slack sends the latest.
@@ -349,8 +435,18 @@ impl App {
         self.render_slack();
     }
 
+    /// Back from a thread to its conversation, or from a conversation to the list.
     pub(super) fn slack_back(&mut self) {
         self.close_slack_assist();
+        if self.slack.thread.is_some() {
+            self.slack.close_thread();
+            self.slack.focus.clear();
+            if let Some(client) = &self.slack.client {
+                client.send(Command::CloseThread);
+            }
+            self.render_slack();
+            return;
+        }
         self.slack.open = None;
         self.slack.focus.clear();
         self.render_slack();
@@ -370,7 +466,7 @@ impl App {
             client.send(Command::Send {
                 channel,
                 text: text.to_string(),
-                thread_ts: None,
+                thread_ts: self.slack.thread.clone(),
             });
         }
     }
@@ -468,13 +564,30 @@ impl App {
                         .iter()
                         .any(|m| m.user.as_deref() != self.slack.me.as_deref());
                     self.slack.messages.extend(messages);
-                    // Something new: show the latest again.
-                    self.slack.focus.clear();
+                    // Something new: show the latest again, unless reading a thread.
+                    if self.slack.thread.is_none() {
+                        self.slack.focus.clear();
+                    }
                     if from_others && !self.slack_visible() {
                         self.unread = true;
                     }
                 } else {
                     self.unread = true;
+                }
+            }
+            Event::Thread {
+                channel,
+                thread_ts,
+                messages,
+            } => {
+                let open = self.slack.open.as_deref() == Some(&channel)
+                    && self.slack.thread.as_deref() == Some(&thread_ts);
+                if open {
+                    // Replies were already shown: this is news, so show the latest.
+                    if self.slack.thread_messages.len() > 1 {
+                        self.slack.focus.clear();
+                    }
+                    self.slack.thread_messages = messages;
                 }
             }
             Event::Sent { .. } => {}
@@ -493,6 +606,7 @@ impl App {
                 self.slack.signed_in = false;
                 self.slack.client = None;
                 self.slack.open = None;
+                self.slack.close_thread();
                 if self.slack.saved_session {
                     let _ = keychain::clear();
                 }
@@ -513,12 +627,13 @@ impl App {
             return;
         }
         if self.slack.open.is_some() {
-            let messages = self.slack.messages.clone();
+            let messages = self.slack.shown().to_vec();
             self.want_images(&messages);
         }
         let page = self.chat.slack();
         match &self.slack.open {
             Some(_) => page.render_conversation(
+                self.slack.thread.is_some(),
                 &self.slack.open_title(),
                 &self.slack.rendered(now_secs()),
                 &self.emoji.glyphs,
@@ -557,7 +672,7 @@ impl App {
         if for_me.len() > 1 {
             title.push_str(&format!(" ({} messages)", for_me.len()));
         }
-        let detail = message_body(last, &self.slack.names, false);
+        let detail = message_body(last, &self.slack.names, Shown::Text);
         // One item per sender and conversation: their last message replaces the earlier ones.
         let key = format!(
             "slack:{channel}:{}",
@@ -608,11 +723,23 @@ fn env_credentials() -> Option<Credentials> {
     })
 }
 
+/// Where a message body is shown, which decides how its images and replies read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shown {
+    /// In the conversation, at this index of its messages: images drawn, and
+    /// the reply count a link opening the thread.
+    Channel(usize),
+    /// In its thread: images drawn, the replies being right below.
+    Thread,
+    /// As text, for Claude or a notification: images named.
+    Text,
+}
+
 /// A message's text in Markdown, with what Slack shows besides text: attached
 /// images and files, a link or bot card summary, and a thread's reply count.
-/// With `draw_images`, each image is a marker the transcript swaps for the
-/// picture; otherwise it is named.
-fn message_body(message: &Message, names: &NameMap, draw_images: bool) -> String {
+/// In the transcript each image is a marker swapped for the picture;
+/// elsewhere it is named.
+fn message_body(message: &Message, names: &NameMap, shown: Shown) -> String {
     let text = format::to_markdown(&message.text, names);
     let mut parts = Vec::new();
     if !text.trim().is_empty() {
@@ -620,18 +747,21 @@ fn message_body(message: &Message, names: &NameMap, draw_images: bool) -> String
     } else if let Some(summary) = &message.attachment {
         parts.push(format!("_{}_", summary.trim()));
     }
-    parts.extend(message.images.iter().map(|image| {
-        if draw_images {
-            emoji_text::image_marker(&image.id)
-        } else {
-            format!("🖼 {}", image.title)
-        }
+    parts.extend(message.images.iter().map(|image| match shown {
+        Shown::Channel(_) | Shown::Thread => emoji_text::image_marker(&image.id),
+        Shown::Text => format!("🖼 {}", image.title),
     }));
     parts.extend(message.files.iter().map(|name| format!("📎 {name}")));
-    match message.reply_count {
-        0 => {}
-        1 => parts.push("↳ 1 reply".to_string()),
-        n => parts.push(format!("↳ {n} replies")),
+    let replies = match message.reply_count {
+        0 => None,
+        n => Some(format!("↳ {}", timeline::replies_label(n as usize))),
+    };
+    match (replies, shown) {
+        (Some(replies), Shown::Channel(index)) => {
+            parts.push(format!("[{replies}]({})", rich_text::thread_link(index)))
+        }
+        (Some(replies), Shown::Text) => parts.push(replies),
+        (Some(_), Shown::Thread) | (None, _) => {}
     }
     if parts.is_empty() {
         parts.push("_(no text)_".to_string());
@@ -728,9 +858,24 @@ mod tests {
             ..message("see attached")
         };
         assert_eq!(
-            message_body(&msg, &names, true),
+            message_body(&msg, &names, Shown::Text),
             "see attached\n📎 plan.pdf\n↳ 3 replies"
         );
+    }
+
+    #[test]
+    fn replies_open_the_thread_from_the_conversation_only() {
+        let names = NameMap::default();
+        let parent = Message {
+            thread_ts: Some("1.0".into()),
+            reply_count: 1,
+            ..message("plan?")
+        };
+        assert_eq!(
+            message_body(&parent, &names, Shown::Channel(4)),
+            format!("plan?\n[↳ 1 reply]({})", rich_text::thread_link(4))
+        );
+        assert_eq!(message_body(&parent, &names, Shown::Thread), "plan?");
     }
 
     #[test]
@@ -745,11 +890,13 @@ mod tests {
             }],
             ..message("look")
         };
+        let marked = format!("look\n{}", emoji_text::image_marker("F1"));
+        assert_eq!(message_body(&msg, &names, Shown::Channel(0)), marked);
+        assert_eq!(message_body(&msg, &names, Shown::Thread), marked);
         assert_eq!(
-            message_body(&msg, &names, true),
-            format!("look\n{}", emoji_text::image_marker("F1"))
+            message_body(&msg, &names, Shown::Text),
+            "look\n🖼 Screenshot"
         );
-        assert_eq!(message_body(&msg, &names, false), "look\n🖼 Screenshot");
     }
 
     #[test]
@@ -759,8 +906,11 @@ mod tests {
             attachment: Some("Build passed".into()),
             ..message("")
         };
-        assert_eq!(message_body(&card, &names, true), "_Build passed_");
-        assert_eq!(message_body(&message(""), &names, true), "_(no text)_");
+        assert_eq!(message_body(&card, &names, Shown::Text), "_Build passed_");
+        assert_eq!(
+            message_body(&message(""), &names, Shown::Text),
+            "_(no text)_"
+        );
     }
 
     #[test]

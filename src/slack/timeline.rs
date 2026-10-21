@@ -76,6 +76,37 @@ pub fn timeline(messages: &[Message], now: u64) -> Vec<Entry<'_>> {
     entries
 }
 
+/// Groups a thread (parent first): the parent on its own, a divider counting
+/// the replies, then the replies grouped as usual, their day shown only when
+/// it is not the parent's.
+pub fn thread(messages: &[Message], now: u64) -> Vec<Entry<'_>> {
+    let Some((parent, replies)) = messages.split_first() else {
+        return Vec::new();
+    };
+    let mut entries = timeline(std::slice::from_ref(parent), now);
+    let Some(first_reply) = replies.first() else {
+        return entries;
+    };
+    entries.push(Entry::Day(replies_label(replies.len())));
+    let day = |message: &Message| ts_secs(&message.ts).and_then(clock::local);
+    let same_day = matches!((day(parent), day(first_reply)),
+        (Some(parent), Some(reply)) if parent.same_day(&reply));
+    let mut rest = timeline(replies, now);
+    if same_day && matches!(rest.first(), Some(Entry::Day(_))) {
+        rest.remove(0);
+    }
+    entries.extend(rest);
+    entries
+}
+
+/// "1 reply", "3 replies".
+pub fn replies_label(count: usize) -> String {
+    match count {
+        1 => "1 reply".to_string(),
+        n => format!("{n} replies"),
+    }
+}
+
 /// The first of `wanted` (message `ts`, best first) that is among `messages`.
 pub fn first_loaded<'a>(messages: &[Message], wanted: &'a [String]) -> Option<&'a str> {
     wanted
@@ -204,6 +235,59 @@ mod tests {
                 "User(\"U1\") 00:01 x1",
             ]
         );
+    }
+
+    #[test]
+    fn a_thread_sets_its_parent_apart_from_the_replies() {
+        let now = at(18, 0, 0);
+        let messages = [
+            message("U1", at(9, 0, 0)),
+            message("U1", at(9, 1, 0)),
+            message("U2", at(9, 2, 0)),
+        ];
+        assert_eq!(
+            shape(&thread(&messages, now)),
+            [
+                "day Today",
+                "User(\"U1\") 09:00 x1",
+                "day 2 replies",
+                "User(\"U1\") 09:01 x1",
+                "User(\"U2\") 09:02 x1",
+            ]
+        );
+    }
+
+    #[test]
+    fn replies_on_a_later_day_keep_their_day() {
+        let now = at(18, 0, 0);
+        let messages = [message("U1", at(9, 0, 1)), message("U2", at(9, 0, 0))];
+        assert_eq!(
+            shape(&thread(&messages, now)),
+            [
+                "day Yesterday",
+                "User(\"U1\") 09:00 x1",
+                "day 1 reply",
+                "day Today",
+                "User(\"U2\") 09:00 x1",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_thread_without_replies_is_just_its_parent() {
+        let now = at(18, 0, 0);
+        let parent = [message("U1", at(9, 0, 0))];
+        assert_eq!(
+            shape(&thread(&parent, now)),
+            ["day Today", "User(\"U1\") 09:00 x1"]
+        );
+        assert!(thread(&[], now).is_empty());
+    }
+
+    #[test]
+    fn reply_counts_read_naturally() {
+        assert_eq!(replies_label(1), "1 reply");
+        assert_eq!(replies_label(3), "3 replies");
     }
 
     #[test]

@@ -96,6 +96,20 @@ pub fn steps_turn(url: &str) -> Option<usize> {
     url.strip_prefix(STEPS_SCHEME)?.parse().ok()
 }
 
+/// URL scheme of a Slack message's clickable reply count; the path is the
+/// message's index in the open conversation.
+const THREAD_SCHEME: &str = "meow-thread:";
+
+/// The link opening the thread of the open conversation's message `index`.
+pub fn thread_link(index: usize) -> String {
+    format!("{THREAD_SCHEME}{index}")
+}
+
+/// The message index behind a reply-count link, if `url` is one.
+pub fn thread_index(url: &str) -> Option<usize> {
+    url.strip_prefix(THREAD_SCHEME)?.parse().ok()
+}
+
 /// Links keep their own colors; hovering any link shows the hand cursor.
 pub fn style_links(view: &NSTextView) {
     let cursor = NSCursor::pointingHandCursor();
@@ -377,6 +391,13 @@ fn span_attributes(span: &Span, color: &NSColor) -> Attributes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thread_links_round_trip_their_index() {
+        assert_eq!(thread_index(&thread_link(12)), Some(12));
+        assert_eq!(thread_index(&format!("{STEPS_SCHEME}3")), None);
+        assert_eq!(thread_index("meow-thread:x"), None);
+    }
 
     #[test]
     fn steps_links_round_trip_their_turn() {

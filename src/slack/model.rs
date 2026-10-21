@@ -162,18 +162,30 @@ pub fn parse_channels(body: &str) -> Result<Page<Channel>, SlackError> {
     })
 }
 
-/// Parses a `conversations.history` / `conversations.replies` body. Messages come
-/// back oldest-first (Slack returns newest-first).
+/// Parses a `conversations.history` body. Messages come back oldest-first
+/// (Slack returns newest-first).
 pub fn parse_messages(body: &str) -> Result<Page<Message>, SlackError> {
+    let mut page = parse_message_page(body)?;
+    page.items.reverse();
+    Ok(page)
+}
+
+/// Parses a `conversations.replies` body: the thread's parent, then its
+/// replies oldest-first, as Slack sends them.
+pub fn parse_replies(body: &str) -> Result<Page<Message>, SlackError> {
+    parse_message_page(body)
+}
+
+/// The messages of a body in Slack's order, without system notices.
+fn parse_message_page(body: &str) -> Result<Page<Message>, SlackError> {
     let raw: HistoryResponse = decode(body)?;
     ok(raw.ok, raw.error)?;
-    let mut items: Vec<Message> = raw
+    let items = raw
         .messages
         .into_iter()
         .filter(|m| !m.ts.is_empty() && !is_system_notice(m.subtype.as_deref()))
         .map(Message::from)
         .collect();
-    items.reverse();
     Ok(Page {
         items,
         next_cursor: cursor(raw.response_metadata.next_cursor),
@@ -700,6 +712,19 @@ mod tests {
         let page = parse_messages(body).unwrap();
         let order: Vec<&str> = page.items.iter().map(|m| m.text.as_str()).collect();
         assert_eq!(order, ["first", "second", "third"]);
+    }
+
+    #[test]
+    fn replies_keep_slacks_parent_first_order() {
+        let body = r#"{"ok":true,"messages":[
+            {"ts":"1.0","user":"U1","text":"parent","thread_ts":"1.0","reply_count":2},
+            {"ts":"2.0","user":"U2","text":"first","thread_ts":"1.0"},
+            {"ts":"3.0","user":"U1","text":"second","thread_ts":"1.0"}
+        ],"response_metadata":{"next_cursor":"c2"}}"#;
+        let page = parse_replies(body).unwrap();
+        let order: Vec<&str> = page.items.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(order, ["parent", "first", "second"]);
+        assert_eq!(page.next_cursor.as_deref(), Some("c2"));
     }
 
     #[test]

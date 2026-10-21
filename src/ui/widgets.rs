@@ -305,16 +305,21 @@ pub fn text_field(mtm: MainThreadMarker, placeholder: &str) -> Retained<GrowingF
     field.setBordered(false);
     field.setDrawsBackground(false);
     field.setFocusRingType(NSFocusRingType::None);
-    field.setPlaceholderAttributedString(Some(&rich_text::attributed(
-        placeholder,
-        &Attributes::plain(theme::muted(), theme::font(theme::BODY_SIZE)),
-    )));
+    set_placeholder(&field, placeholder);
     paint(
         &field,
         Some(&theme::field_background()),
         Some((&theme::field_border(), FIELD_BORDER)),
     );
     field
+}
+
+/// Changes the muted hint a [`text_field`] shows while empty.
+pub fn set_placeholder(field: &NSTextField, placeholder: &str) {
+    field.setPlaceholderAttributedString(Some(&rich_text::attributed(
+        placeholder,
+        &Attributes::plain(theme::muted(), theme::font(theme::BODY_SIZE)),
+    )));
 }
 
 /// A flat block button reading `LABEL` in the label font.

@@ -31,6 +31,10 @@ pub enum Command {
     Refresh,
     /// Load a conversation's recent messages and mark it read.
     Open(String),
+    /// Load a thread of a conversation, and keep it fresh while it is open.
+    OpenThread { channel: String, thread_ts: String },
+    /// Stop keeping the open thread fresh.
+    CloseThread,
     /// Send a message, optionally as a thread reply.
     Send {
         channel: String,
@@ -62,6 +66,13 @@ pub enum Event {
     /// Messages that arrived in the open conversation since last seen.
     New {
         channel: String,
+        messages: Vec<Message>,
+    },
+    /// The whole open thread: its parent, then the replies oldest-first. Sent
+    /// when it is opened and again whenever it changes.
+    Thread {
+        channel: String,
+        thread_ts: String,
         messages: Vec<Message>,
     },
     /// A message was sent to this channel.
@@ -121,12 +132,21 @@ impl Drop for SlackClient {
     }
 }
 
+/// The thread being viewed, and what of it was last sent.
+struct OpenThread {
+    channel: String,
+    thread_ts: String,
+    sent: Vec<Message>,
+}
+
 /// The background side. Generic over the transport so tests drive it directly.
 struct Worker<H: Http> {
     api: SlackApi<H>,
     events: Sender<Event>,
     /// The conversation being viewed, polled for new messages.
     open: Option<String>,
+    /// The thread being viewed, polled for new replies.
+    thread: Option<OpenThread>,
     /// Latest message ts applied per conversation.
     seen: HashMap<String, String>,
     /// Users whose names have already been sent, or were known from the cache.
@@ -144,6 +164,7 @@ impl<H: Http> Worker<H> {
             api,
             events,
             open: None,
+            thread: None,
             seen: HashMap::new(),
             known_users: HashSet::new(),
             users: HashMap::new(),
@@ -201,6 +222,8 @@ impl<H: Http> Worker<H> {
         match command {
             Command::Refresh => self.refresh(),
             Command::Open(channel) => self.open(channel),
+            Command::OpenThread { channel, thread_ts } => self.open_thread(channel, thread_ts),
+            Command::CloseThread => self.thread = None,
             Command::Send {
                 channel,
                 text,
@@ -229,6 +252,7 @@ impl<H: Http> Worker<H> {
     }
 
     fn open(&mut self, channel: String) {
+        self.thread = None;
         match self.api.history(&channel, HISTORY_LIMIT) {
             Ok(messages) => {
                 self.remember_latest(&channel, &messages);
@@ -240,6 +264,41 @@ impl<H: Http> Worker<H> {
             }
             Err(err) => self.report(&err),
         }
+    }
+
+    fn open_thread(&mut self, channel: String, thread_ts: String) {
+        self.thread = Some(OpenThread {
+            channel,
+            thread_ts,
+            sent: Vec::new(),
+        });
+        if let Err(err) = self.refresh_thread() {
+            self.report(&err);
+        }
+    }
+
+    /// Sends the open thread when it changed since last sent.
+    fn refresh_thread(&mut self) -> Result<(), ApiError> {
+        let Some(thread) = &self.thread else {
+            return Ok(());
+        };
+        let messages = self.api.replies(&thread.channel, &thread.thread_ts)?;
+        // Nothing back (a deleted thread) leaves what is shown alone.
+        if messages.is_empty() || messages == thread.sent {
+            return Ok(());
+        }
+        let event = Event::Thread {
+            channel: thread.channel.clone(),
+            thread_ts: thread.thread_ts.clone(),
+            messages: messages.clone(),
+        };
+        let authors = authors(&messages);
+        if let Some(thread) = &mut self.thread {
+            thread.sent = messages;
+        }
+        self.emit(event);
+        self.resolve_users(&authors);
+        Ok(())
     }
 
     fn send(&mut self, channel: String, text: String, thread_ts: Option<String>) {
@@ -297,6 +356,12 @@ impl<H: Http> Worker<H> {
         self.polls = self.polls.wrapping_add(1);
         if self.polls.is_multiple_of(REFRESH_EVERY_POLLS) {
             self.refresh();
+        }
+        // Like the conversation, a failed poll is silent unless the session died.
+        if let Err(err) = self.refresh_thread()
+            && !err.retriable()
+        {
+            self.report(&err);
         }
         let Some(channel) = self.open.clone() else {
             return;
@@ -697,6 +762,103 @@ mod tests {
         let _ = events(&rx);
         worker.poll();
         assert!(!events(&rx).iter().any(|e| matches!(e, Event::New { .. })));
+    }
+
+    const THREAD: &str = r#"{"ok":true,"messages":[
+        {"ts":"1.0","user":"U1","text":"parent","thread_ts":"1.0","reply_count":1},
+        {"ts":"2.0","user":"U2","text":"reply","thread_ts":"1.0"}]}"#;
+    const LONGER_THREAD: &str = r#"{"ok":true,"messages":[
+        {"ts":"1.0","user":"U1","text":"parent","thread_ts":"1.0","reply_count":2},
+        {"ts":"2.0","user":"U2","text":"reply","thread_ts":"1.0"},
+        {"ts":"3.0","user":"U2","text":"another","thread_ts":"1.0"}]}"#;
+
+    fn open_thread() -> Command {
+        Command::OpenThread {
+            channel: "C1".into(),
+            thread_ts: "1.0".into(),
+        }
+    }
+
+    /// The messages of each `Thread` event, as texts.
+    fn threads(events: &[Event]) -> Vec<Vec<String>> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Thread { messages, .. } => {
+                    Some(messages.iter().map(|m| m.text.clone()).collect())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn opening_a_thread_sends_its_messages_then_resolves_authors() {
+        let (mut worker, rx) = worker(
+            Router::new()
+                .on("conversations.replies", &[THREAD])
+                .on("users.info", &[BOB]),
+        );
+        worker.known_users.insert("U1".into());
+        worker.handle(open_thread());
+        let got = events(&rx);
+        match got.as_slice() {
+            [
+                Event::Thread {
+                    channel,
+                    thread_ts,
+                    messages,
+                },
+                Event::Users(users),
+            ] => {
+                assert_eq!((channel.as_str(), thread_ts.as_str()), ("C1", "1.0"));
+                assert_eq!(messages.len(), 2);
+                assert_eq!(users[0].name(), "bob");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_open_thread_is_sent_again_only_when_it_changes() {
+        let (mut worker, rx) =
+            worker(Router::new().on("conversations.replies", &[THREAD, THREAD, LONGER_THREAD]));
+        worker
+            .known_users
+            .extend(["U1".to_string(), "U2".to_string()]);
+        worker.handle(open_thread());
+        worker.poll();
+        worker.poll();
+        assert_eq!(
+            threads(&events(&rx)),
+            [vec!["parent", "reply"], vec!["parent", "reply", "another"]]
+        );
+    }
+
+    #[test]
+    fn a_closed_thread_is_no_longer_polled() {
+        let (mut worker, rx) =
+            worker(Router::new().on("conversations.replies", &[THREAD, LONGER_THREAD]));
+        worker
+            .known_users
+            .extend(["U1".to_string(), "U2".to_string()]);
+        worker.handle(open_thread());
+        worker.handle(Command::CloseThread);
+        worker.poll();
+        assert_eq!(threads(&events(&rx)).len(), 1);
+    }
+
+    #[test]
+    fn opening_a_conversation_leaves_the_thread() {
+        let (mut worker, rx) =
+            worker(Router::new().on("conversations.replies", &[THREAD, LONGER_THREAD]));
+        worker
+            .known_users
+            .extend(["U1".to_string(), "U2".to_string()]);
+        worker.handle(open_thread());
+        worker.handle(Command::Open("D1".into()));
+        worker.poll();
+        assert_eq!(threads(&events(&rx)).len(), 1);
     }
 
     #[test]

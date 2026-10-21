@@ -536,6 +536,7 @@ impl App {
             UiEvent::DeleteRoutine(row) => self.delete_routine(row),
             UiEvent::SignInSlack => self.sign_in_slack(),
             UiEvent::OpenSlackConversation(row) => self.open_slack_conversation(row),
+            UiEvent::OpenSlackThread(index) => self.open_slack_thread(index),
             UiEvent::SlackBack => self.slack_back(),
             UiEvent::SendSlack => self.send_slack(),
             UiEvent::AskSlack => self.ask_slack(),

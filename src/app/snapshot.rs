@@ -5,19 +5,24 @@
 //! quits. The Slack pages are filled with sample messages, so no sign-in is
 //! needed (launch with dummy `MEOW_SLACK_*` values to keep off the Keychain).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use meow::sprites::{self, Bubble, Facing, Look, Pose};
 use meow::transcript::Transcript;
 
+use crate::ui::emoji_text::{self, ImageGlyph};
 use crate::ui::events::UiEvent;
+use crate::ui::rich_text;
 use crate::ui::slack_assist::AssistView;
 use crate::ui::slack_page::{ConversationRow, TranscriptItem};
+use crate::ui::widgets;
 
 use super::App;
 
 /// The pages, in order; each is saved once it has settled.
-const STEPS: [&str; 9] = [
+const STEPS: [&str; 10] = [
     "chat",
     "chat-two-lines",
     "chat-long",
@@ -26,6 +31,7 @@ const STEPS: [&str; 9] = [
     "slack-list",
     "slack-conversation",
     "slack-focus",
+    "slack-thread",
     "slack-assist",
 ];
 /// Time for the app to settle before the first step (fonts, tasks).
@@ -105,6 +111,7 @@ impl App {
                 self.chat
                     .slack()
                     .render_conversation(
+                        false,
                         "Hugo",
                         &sample_transcript(),
                         &Default::default(),
@@ -113,10 +120,20 @@ impl App {
             }
             "slack-focus" => {
                 self.chat.slack().render_conversation(
+                    false,
                     "Hugo",
                     &focused_transcript(),
                     &Default::default(),
                     &Default::default(),
+                );
+            }
+            "slack-thread" => {
+                self.chat.slack().render_conversation(
+                    true,
+                    "Thread in #release",
+                    &thread_transcript(),
+                    &Default::default(),
+                    &sample_images(),
                 );
             }
             _ => {
@@ -177,7 +194,11 @@ fn sample_transcript() -> Vec<TranscriptItem> {
             "Hugo",
             "09:41",
             false,
-            &["Tu aurais 30 min demain pour la PR Android ? Je préfère qu'on la passe ensemble."],
+            &[&format!(
+                "Tu aurais 30 min demain pour la PR Android ? Je préfère qu'on la passe ensemble.\n\
+                 [↳ 2 replies]({})",
+                rich_text::thread_link(0)
+            )],
         ),
         run("Toi", "09:42", true, &["Oui, le matin m'arrange."]),
         run("Hugo", "09:42", false, &["Top, merci !"]),
@@ -224,6 +245,51 @@ fn focused_transcript() -> Vec<TranscriptItem> {
         items.push(run("Léa", &format!("{hour:02}:30"), &["Go"], None));
     }
     items
+}
+
+/// A thread opened from #release: the parent, then replies with a screenshot.
+fn thread_transcript() -> Vec<TranscriptItem> {
+    let run = |author: &str, time: &str, bodies: &[String]| TranscriptItem::Run {
+        author: author.to_string(),
+        time: time.to_string(),
+        mine: author == "Toi",
+        bodies: bodies.to_vec(),
+        focus: None,
+    };
+    vec![
+        TranscriptItem::Day("Today".to_string()),
+        run(
+            "Inès",
+            "10:02",
+            &["Le build iOS est rouge, quelqu'un regarde ?".to_string()],
+        ),
+        TranscriptItem::Day("2 replies".to_string()),
+        run(
+            "Hugo",
+            "10:05",
+            &[
+                "Je regarde, voilà ce que j'ai :".to_string(),
+                emoji_text::image_marker("F1"),
+            ],
+        ),
+        run("Toi", "10:07", &["Merci, je relance la CI.".to_string()]),
+    ]
+}
+
+/// The thread's screenshot: the cat, standing in for a real image.
+fn sample_images() -> HashMap<String, ImageGlyph> {
+    let look = Look {
+        pose: Pose::Stand,
+        bubble: Bubble::None,
+        facing: Facing::Right,
+    };
+    let frame = sprites::render(&look, Default::default());
+    let glyph = ImageGlyph {
+        image: Some(widgets::pixel_image(&frame, 8.0)),
+        title: "build.png".to_string(),
+        link: None,
+    };
+    HashMap::from([("F1".to_string(), glyph)])
 }
 
 fn sample_chat() -> Transcript {

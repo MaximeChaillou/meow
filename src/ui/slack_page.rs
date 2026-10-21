@@ -52,6 +52,10 @@ const CARD_PADDING: f64 = 12.0;
 const TAB_WIDTH: f64 = 150.0;
 const TAB_HEIGHT: f64 = 28.0;
 const TAB_GAP: f64 = 6.0;
+const BACK_TO_LIST: &str = "‹ Messages";
+const BACK_TO_CONVERSATION: &str = "‹ Back";
+const REPLY_HINT: &str = "Reply, or ask Claude… (Esc: back)";
+const THREAD_REPLY_HINT: &str = "Reply in thread, or ask Claude… (Esc: back)";
 
 /// Which conversations the list shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -222,7 +226,7 @@ impl SlackPage {
 
         let back = widgets::text_button(
             mtm,
-            "‹ Messages",
+            BACK_TO_LIST,
             widgets::ButtonStyle::Link,
             target,
             sel!(slackBack:),
@@ -257,7 +261,7 @@ impl SlackPage {
         live.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
         strip.addSubview(&live);
 
-        let input = widgets::text_field(mtm, "Reply, or ask Claude… (Esc: back)");
+        let input = widgets::text_field(mtm, REPLY_HINT);
         // SAFETY: the controller lives as long as the app, so the weak target/delegate stay valid.
         unsafe {
             input.setTarget(Some(target));
@@ -514,10 +518,12 @@ impl SlackPage {
         self.shown_ids.replace(ids);
     }
 
-    /// Shows one conversation's messages and the reply box; `:name:` found in
-    /// `emoji` is drawn as that custom emoji, and attached images from `images`.
+    /// Shows one conversation's messages, or one of its threads, and the reply
+    /// box; `:name:` found in `emoji` is drawn as that custom emoji, and
+    /// attached images from `images`.
     pub fn render_conversation(
         &self,
+        in_thread: bool,
         title: &str,
         items: &[TranscriptItem],
         emoji: &HashMap<String, EmojiGlyph>,
@@ -528,6 +534,12 @@ impl SlackPage {
         self.list_scroll.setHidden(true);
         self.voice.view.setHidden(true);
         self.set_conversation_hidden(false);
+        let (back, hint) = match in_thread {
+            true => (BACK_TO_CONVERSATION, THREAD_REPLY_HINT),
+            false => (BACK_TO_LIST, REPLY_HINT),
+        };
+        widgets::set_text_button_label(&self.back, back, widgets::ButtonStyle::Link);
+        widgets::set_placeholder(&self.input, hint);
 
         self.convo_title
             .setAttributedStringValue(&rich_text::attributed(
@@ -565,6 +577,18 @@ impl SlackPage {
         // SAFETY: the text view always owns a text storage.
         if let Some(storage) = unsafe { self.transcript.textStorage() } {
             storage.setAttributedString(&text);
+            // Lay everything out first: an image's height is only known once
+            // laid out, and scrolling before that stops short of the end.
+            // SAFETY: a text view built by AppKit owns its layout manager and container.
+            let (layout, container) = unsafe {
+                (
+                    self.transcript.layoutManager(),
+                    self.transcript.textContainer(),
+                )
+            };
+            if let (Some(layout), Some(container)) = (layout, container) {
+                layout.ensureLayoutForTextContainer(&container);
+            }
             self.transcript
                 .scrollRangeToVisible(NSRange::new(storage.length(), 0));
             // From the bottom, scrolling back up just enough puts the focused
