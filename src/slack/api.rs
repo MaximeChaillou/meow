@@ -72,6 +72,12 @@ impl<H: Http> SlackApi<H> {
         &self.creds
     }
 
+    /// The transport, for tests to see what was called.
+    #[cfg(test)]
+    pub fn http(&self) -> &H {
+        &self.http
+    }
+
     /// Confirms the credentials still work.
     pub fn auth_test(&self) -> Result<AuthTest, ApiError> {
         let body = self.call("auth.test", &[])?;
@@ -158,6 +164,12 @@ impl<H: Http> SlackApi<H> {
     pub fn counts(&self) -> Result<Vec<Activity>, ApiError> {
         let body = self.call("client.counts", &[])?;
         model::parse_counts(&body).map_err(ApiError::Slack)
+    }
+
+    /// A fresh URL for the live websocket, valid for a short while.
+    pub fn rtm_connect(&self) -> Result<String, ApiError> {
+        let body = self.call("rtm.connect", &[])?;
+        model::parse_rtm_connect(&body).map_err(ApiError::Slack)
     }
 
     /// The workspace's custom emoji: names to an image URL or `alias:name`.
@@ -362,6 +374,30 @@ mod tests {
             r#"{"ok":true,"user_id":"U7","team_id":"T7"}"#,
         ]));
         assert_eq!(api.auth_test().unwrap().user_id, "U7");
+    }
+
+    #[test]
+    fn rtm_connect_returns_the_websocket_url() {
+        let api = api(FakeHttp::with(&[
+            r#"{"ok":true,"url":"wss://wss-primary.slack.com/websocket/abc"}"#,
+        ]));
+        assert_eq!(
+            api.rtm_connect().unwrap(),
+            "wss://wss-primary.slack.com/websocket/abc"
+        );
+        assert_eq!(
+            api.http.last().url,
+            "https://acme.slack.com/api/rtm.connect"
+        );
+    }
+
+    #[test]
+    fn rtm_connect_without_a_url_is_malformed() {
+        let api = api(FakeHttp::with(&[r#"{"ok":true}"#]));
+        assert!(matches!(
+            api.rtm_connect(),
+            Err(ApiError::Slack(SlackError::Malformed(_)))
+        ));
     }
 
     #[test]

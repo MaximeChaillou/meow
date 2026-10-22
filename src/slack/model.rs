@@ -331,6 +331,22 @@ pub fn parse_emoji_list(body: &str) -> Result<HashMap<String, String>, SlackErro
     Ok(raw.emoji)
 }
 
+/// Parses an `rtm.connect` body: the websocket URL to open.
+pub fn parse_rtm_connect(body: &str) -> Result<String, SlackError> {
+    #[derive(Deserialize)]
+    struct RtmConnect {
+        ok: bool,
+        #[serde(default)]
+        error: Option<String>,
+        #[serde(default)]
+        url: Option<String>,
+    }
+    let raw: RtmConnect = decode(body)?;
+    ok(raw.ok, raw.error)?;
+    raw.url
+        .ok_or_else(|| SlackError::Malformed("no url in rtm.connect response".into()))
+}
+
 fn decode<T: for<'de> Deserialize<'de>>(body: &str) -> Result<T, SlackError> {
     serde_json::from_str(body).map_err(|e| SlackError::Malformed(e.to_string()))
 }

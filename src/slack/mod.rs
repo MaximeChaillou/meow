@@ -16,5 +16,6 @@ pub mod format;
 pub mod http;
 pub mod keychain;
 pub mod model;
+pub mod socket;
 pub mod timeline;
 pub mod voice;

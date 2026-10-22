@@ -1,24 +1,35 @@
 //! The live Slack client: a background worker that owns the Web API and reaches
 //! the 30 Hz tick over channels, like [`crate::claude::Run`].
 //!
-//! Phase one keeps the conversation fresh by polling the open conversation every
-//! few seconds. The same [`Event`] stream will later be fed by a websocket, with
-//! polling as the fallback, without the UI noticing.
+//! Slack's live websocket ([`super::socket`]) says what changed as it happens,
+//! and the worker fetches just that. Polling stays as the fallback: every few
+//! seconds while the websocket is down, and rarely once it is up, to catch up
+//! on anything missed.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::api::{ApiError, HISTORY_LIMIT, SlackApi};
 use super::auth::Credentials;
 use super::http::{Http, Web};
 use super::model::{Activity, AuthTest, Channel, Message, User};
+use super::socket::{self, Change};
 
-/// How often an idle worker re-checks the open conversation.
+/// How often an idle worker re-checks the open conversation without the websocket.
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
-/// Re-list conversations once every this many polls (~30s).
-const REFRESH_EVERY_POLLS: u32 = 10;
+/// How often it still does while the websocket is up, in case a change slipped by.
+const LIVE_POLL_INTERVAL: Duration = Duration::from_secs(30);
+/// How often polling re-lists conversations, for changes the websocket does not announce.
+const RELIST_EVERY: Duration = Duration::from_secs(30);
+/// The first wait before reopening a lost websocket; it doubles up to the max.
+const RETRY_FIRST: Duration = Duration::from_secs(2);
+const RETRY_MAX: Duration = Duration::from_secs(60);
+/// Up this long, a lost websocket is retried from the first wait again.
+const STABLE_AFTER: Duration = Duration::from_secs(30);
 /// At most this many people are looked up for an invite.
 const MAX_PEOPLE: usize = 100;
 /// Conversation types shown: DMs, group DMs and the user's channels.
@@ -45,6 +56,8 @@ pub enum Command {
     People(String),
     /// Fetch the user's own recent messages, to learn how they write.
     FetchMyMessages { limit: usize },
+    /// Something changed on Slack. Sent by the websocket, not by the app.
+    Live(Change),
     /// Stop the worker.
     Stop,
 }
@@ -105,10 +118,11 @@ impl SlackClient {
     pub fn connect(creds: Credentials, known: Vec<User>) -> Self {
         let (commands_tx, commands_rx) = mpsc::channel();
         let (events_tx, events_rx) = mpsc::channel();
+        let live_tx = commands_tx.clone();
         let handle = thread::spawn(move || {
             Worker::new(SlackApi::new(Web::new(), creds), events_tx)
                 .knowing(known)
-                .run(commands_rx);
+                .run(commands_rx, live_tx);
         });
         Self {
             commands: commands_tx,
@@ -129,6 +143,112 @@ impl Drop for SlackClient {
         // block the app for the length of an in-flight request.
         let _ = self.commands.send(Command::Stop);
         let _ = self.handle.take();
+    }
+}
+
+/// Where the websocket stands, and how long to wait before reopening it.
+#[derive(Debug)]
+enum LiveState {
+    /// Down since start or lost; reopen at `at`, `after` waiting that long.
+    Down {
+        at: Instant,
+        after: Duration,
+    },
+    Connecting,
+    Up {
+        since: Instant,
+    },
+}
+
+struct Live {
+    state: LiveState,
+    /// The wait before the next reopen, should this connection be lost.
+    backoff: Duration,
+}
+
+impl Live {
+    fn new() -> Self {
+        Self {
+            state: LiveState::Down {
+                at: Instant::now(),
+                after: Duration::ZERO,
+            },
+            backoff: RETRY_FIRST,
+        }
+    }
+
+    fn is_up(&self) -> bool {
+        matches!(self.state, LiveState::Up { .. })
+    }
+
+    /// When to try reopening it, while it is down.
+    fn retry_at(&self) -> Option<Instant> {
+        match self.state {
+            LiveState::Down { at, .. } => Some(at),
+            LiveState::Connecting | LiveState::Up { .. } => None,
+        }
+    }
+
+    fn connecting(&mut self) {
+        self.state = LiveState::Connecting;
+    }
+
+    fn up(&mut self) {
+        self.state = LiveState::Up {
+            since: Instant::now(),
+        };
+    }
+
+    /// Schedules a reopen, waiting longer each time unless it had been up a while.
+    fn lost(&mut self) {
+        if let LiveState::Up { since } = self.state
+            && since.elapsed() >= STABLE_AFTER
+        {
+            self.backoff = RETRY_FIRST;
+        }
+        self.state = LiveState::Down {
+            at: Instant::now() + self.backoff,
+            after: self.backoff,
+        };
+        self.backoff = (self.backoff * 2).min(RETRY_MAX);
+    }
+
+    /// The wait chosen when it was last lost.
+    fn retry_in(&self) -> Duration {
+        match self.state {
+            LiveState::Down { after, .. } => after,
+            LiveState::Connecting | LiveState::Up { .. } => Duration::ZERO,
+        }
+    }
+}
+
+/// What the websocket said changed, gathered so a burst is fetched once.
+#[derive(Default)]
+struct Pending {
+    /// The open conversation got a message.
+    history: bool,
+    /// A message already shown in it changed, so reload it whole.
+    edited: bool,
+    /// The open thread changed.
+    thread: bool,
+    /// Unread state moved in a conversation already listed.
+    activity: bool,
+    /// The list itself changed.
+    relist: bool,
+}
+
+impl Pending {
+    fn any(&self) -> bool {
+        self.history || self.thread || self.activity || self.relist
+    }
+}
+
+/// Tells the websocket thread to stop once the worker is gone.
+struct StopOnDrop(Arc<AtomicBool>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
     }
 }
 
@@ -153,9 +273,14 @@ struct Worker<H: Http> {
     known_users: HashSet<String>,
     /// Everything known about those users, for `People` without a lookup.
     users: HashMap<String, User>,
-    polls: u32,
+    /// When conversations were last listed.
+    listed: Instant,
     /// Our own user id, once `auth.test` has answered.
     me: Option<String>,
+    /// Every conversation last listed, before keeping the sidebar's.
+    channels: Vec<Channel>,
+    live: Live,
+    pending: Pending,
 }
 
 impl<H: Http> Worker<H> {
@@ -168,8 +293,11 @@ impl<H: Http> Worker<H> {
             seen: HashMap::new(),
             known_users: HashSet::new(),
             users: HashMap::new(),
-            polls: 0,
+            listed: Instant::now(),
             me: None,
+            channels: Vec::new(),
+            live: Live::new(),
+            pending: Pending::default(),
         }
     }
 
@@ -182,17 +310,168 @@ impl<H: Http> Worker<H> {
         self
     }
 
-    fn run(mut self, commands: Receiver<Command>) {
+    /// Serves `commands` until told to stop. `live` reaches the same queue, for
+    /// the websocket to report changes on.
+    fn run(mut self, commands: Receiver<Command>, live: Sender<Command>) {
         if !self.connect() {
             return;
         }
+        let stop = StopOnDrop(Arc::new(AtomicBool::new(false)));
         self.handle(Command::Refresh);
         self.fetch_emoji();
+        // A deadline rather than a timeout, so commands cannot keep pushing polls back.
+        let mut polled = Instant::now();
         loop {
-            match commands.recv_timeout(POLL_INTERVAL) {
-                Ok(Command::Stop) | Err(RecvTimeoutError::Disconnected) => return,
-                Ok(command) => self.handle(command),
-                Err(RecvTimeoutError::Timeout) => self.poll(),
+            if self.live.retry_at().is_some_and(|at| at <= Instant::now()) {
+                self.start_live(&live, &stop.0);
+            }
+            let next_poll = polled + self.poll_interval();
+            let mut wake = self
+                .live
+                .retry_at()
+                .map_or(next_poll, |at| at.min(next_poll));
+            // A change whose fetch failed is tried again soon, not at the next poll.
+            if self.pending.any() {
+                wake = wake.min(Instant::now() + POLL_INTERVAL);
+            }
+            match commands.recv_timeout(wake.saturating_duration_since(Instant::now())) {
+                Ok(command) => {
+                    // Take everything already queued before fetching anything.
+                    let mut next = Some(command);
+                    while let Some(command) = next {
+                        if command == Command::Stop {
+                            return;
+                        }
+                        self.handle(command);
+                        next = commands.try_recv().ok();
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => return,
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+            self.apply_pending();
+            if polled.elapsed() >= self.poll_interval() {
+                self.poll();
+                polled = Instant::now();
+            }
+        }
+    }
+
+    fn poll_interval(&self) -> Duration {
+        if self.live.is_up() {
+            LIVE_POLL_INTERVAL
+        } else {
+            POLL_INTERVAL
+        }
+    }
+
+    /// Opens the websocket, which reports back as [`Command::Live`] on `live`.
+    fn start_live(&mut self, live: &Sender<Command>, stop: &Arc<AtomicBool>) {
+        match self.api.rtm_connect() {
+            Ok(url) => {
+                self.live.connecting();
+                let live = live.clone();
+                socket::spawn(
+                    url,
+                    self.api.creds().cookie.clone(),
+                    Arc::clone(stop),
+                    move |change| live.send(Command::Live(change)).is_ok(),
+                );
+            }
+            Err(err) => {
+                if is_expiry(&err) {
+                    self.report(&err);
+                }
+                self.live.lost();
+                eprintln!(
+                    "meow: slack: live connection unavailable ({err}); retrying in {}s",
+                    self.live.retry_in().as_secs()
+                );
+            }
+        }
+    }
+
+    /// Notes what a websocket change means to fetch; [`Self::apply_pending`] does it.
+    fn on_change(&mut self, change: Change) {
+        match change {
+            Change::Hello => {
+                eprintln!("meow: slack: live connection up");
+                self.live.up();
+                // Whatever happened while it was down was only polled for.
+                self.pending.history = self.open.is_some();
+                self.pending.thread = self.thread.is_some();
+                self.pending.activity = true;
+            }
+            Change::Lost => {
+                self.live.lost();
+                eprintln!(
+                    "meow: slack: live connection down; polling, retrying in {}s",
+                    self.live.retry_in().as_secs()
+                );
+            }
+            Change::Message {
+                channel,
+                thread_ts,
+                edited,
+            } => {
+                if self.open.as_deref() == Some(&channel) {
+                    self.pending.history = true;
+                    self.pending.edited |= edited;
+                }
+                if let (Some(thread), Some(thread_ts)) = (&self.thread, &thread_ts)
+                    && thread.channel == channel
+                    && &thread.thread_ts == thread_ts
+                {
+                    self.pending.thread = true;
+                }
+                self.activity_in(&channel);
+            }
+            Change::Read { channel } => self.activity_in(&channel),
+            Change::Conversations => self.pending.relist = true,
+        }
+    }
+
+    /// Unread state moved in `channel`: refresh it, or relist for one not listed yet.
+    fn activity_in(&mut self, channel: &str) {
+        if self.channels.iter().any(|c| c.id == channel) {
+            self.pending.activity = true;
+        } else {
+            self.pending.relist = true;
+        }
+    }
+
+    /// Fetches what the websocket said changed since last time. What failed
+    /// for a passing reason stays pending, to be tried again.
+    fn apply_pending(&mut self) {
+        let pending = std::mem::take(&mut self.pending);
+        let mut retry = Pending::default();
+        if pending.relist {
+            let result = self.try_refresh();
+            retry.relist = self.should_retry(result);
+        } else if pending.activity {
+            let result = self.refresh_activity();
+            retry.activity = self.should_retry(result);
+        }
+        if pending.history {
+            let result = self.fetch_open(pending.edited);
+            retry.history = self.should_retry(result);
+            retry.edited = retry.history && pending.edited;
+        }
+        if pending.thread {
+            let result = self.refresh_thread();
+            retry.thread = self.should_retry(result);
+        }
+        self.pending = retry;
+    }
+
+    /// Whether a failed fetch is worth trying again; a fatal failure is reported instead.
+    fn should_retry(&self, result: Result<(), ApiError>) -> bool {
+        match result {
+            Ok(()) => false,
+            Err(err) if err.retriable() => true,
+            Err(err) => {
+                self.report(&err);
+                false
             }
         }
     }
@@ -231,24 +510,48 @@ impl<H: Http> Worker<H> {
             } => self.send(channel, text, thread_ts),
             Command::FetchMyMessages { limit } => self.fetch_my_messages(limit),
             Command::People(channel) => self.people(channel),
+            Command::Live(change) => self.on_change(change),
             Command::Stop => {}
         }
     }
 
     fn refresh(&mut self) {
-        match self.api.all_conversations(TYPES) {
-            Ok(channels) => {
-                // Without activity, show every conversation rather than none.
-                let channels = match self.api.counts() {
-                    Ok(activity) if !activity.is_empty() => with_activity(channels, &activity),
-                    _ => channels,
-                };
-                let others: Vec<String> = channels.iter().filter_map(|c| c.user.clone()).collect();
-                self.emit(Event::Conversations(channels));
-                self.resolve_users(&others);
-            }
-            Err(err) => self.report(&err),
+        if let Err(err) = self.try_refresh() {
+            self.report(&err);
         }
+    }
+
+    fn try_refresh(&mut self) -> Result<(), ApiError> {
+        let channels = self.api.all_conversations(TYPES)?;
+        self.listed = Instant::now();
+        self.channels = channels.clone();
+        // Without activity, show every conversation rather than none.
+        let channels = match self.api.counts() {
+            Ok(activity) if !activity.is_empty() => with_activity(channels, &activity),
+            _ => channels,
+        };
+        self.show(channels);
+        Ok(())
+    }
+
+    /// Fresh unread state for the conversations already listed, without
+    /// listing them all again.
+    fn refresh_activity(&mut self) -> Result<(), ApiError> {
+        if self.channels.is_empty() {
+            return self.try_refresh();
+        }
+        let activity = self.api.counts()?;
+        if !activity.is_empty() {
+            self.show(with_activity(self.channels.clone(), &activity));
+        }
+        Ok(())
+    }
+
+    /// Sends the conversations to show, then the names of their people.
+    fn show(&mut self, channels: Vec<Channel>) {
+        let others: Vec<String> = channels.iter().filter_map(|c| c.user.clone()).collect();
+        self.emit(Event::Conversations(channels));
+        self.resolve_users(&others);
     }
 
     fn open(&mut self, channel: String) {
@@ -307,9 +610,13 @@ impl<H: Http> Worker<H> {
                 self.emit(Event::Sent {
                     channel: channel.clone(),
                 });
-                // Pick up our own message (and anything else) right away.
+                // Pick up our own message (and anything else) right away; a
+                // failure here is caught up by the next poll.
+                if thread_ts.is_some() {
+                    let _ = self.refresh_thread();
+                }
                 if self.open.as_deref() == Some(&channel) {
-                    self.poll();
+                    let _ = self.fetch_open(false);
                 }
             }
             Err(err) => self.report(&err),
@@ -353,39 +660,39 @@ impl<H: Http> Worker<H> {
 
     /// Idle work: new messages in the open conversation, and an occasional relist.
     fn poll(&mut self) {
-        self.polls = self.polls.wrapping_add(1);
-        if self.polls.is_multiple_of(REFRESH_EVERY_POLLS) {
+        if self.listed.elapsed() >= RELIST_EVERY {
             self.refresh();
         }
-        // Like the conversation, a failed poll is silent unless the session died.
-        if let Err(err) = self.refresh_thread()
-            && !err.retriable()
-        {
-            self.report(&err);
-        }
+        // A failed poll is silent unless the session died; the next one retries.
+        let result = self.refresh_thread();
+        self.should_retry(result);
+        let result = self.fetch_open(false);
+        self.should_retry(result);
+    }
+
+    /// Sends what is new in the open conversation, and with `reload` all of it
+    /// again too, for edits and deletions.
+    fn fetch_open(&mut self, reload: bool) -> Result<(), ApiError> {
         let Some(channel) = self.open.clone() else {
-            return;
+            return Ok(());
         };
-        match self.api.history(&channel, HISTORY_LIMIT) {
-            Ok(messages) => {
-                let fresh = self.since_seen(&channel, messages);
-                if !fresh.is_empty() {
-                    self.remember_latest(&channel, &fresh);
-                    self.mark_read(&channel, &fresh);
-                    let authors = authors(&fresh);
-                    self.emit(Event::New {
-                        channel,
-                        messages: fresh,
-                    });
-                    self.resolve_users(&authors);
-                }
-            }
-            // A failed poll is silent unless the session died; the next tick retries.
-            Err(err) if !err.retriable() => {
-                self.report(&err);
-            }
-            Err(_) => {}
+        let messages = self.api.history(&channel, HISTORY_LIMIT)?;
+        let all = reload.then(|| messages.clone());
+        let fresh = self.since_seen(&channel, messages);
+        if !fresh.is_empty() {
+            self.remember_latest(&channel, &fresh);
+            self.mark_read(&channel, &fresh);
+            let authors = authors(&fresh);
+            self.emit(Event::New {
+                channel: channel.clone(),
+                messages: fresh,
+            });
+            self.resolve_users(&authors);
         }
+        if let Some(messages) = all {
+            self.emit(Event::History { channel, messages });
+        }
+        Ok(())
     }
 
     /// Keeps only messages newer than the last one applied for `channel`.
@@ -496,13 +803,21 @@ mod tests {
     /// never steals a `conversations.history` body. Unqueued methods reply `ok`.
     struct Router {
         by_method: RefCell<HashMap<String, Vec<String>>>,
+        /// Every method called, in order.
+        calls: RefCell<Vec<String>>,
     }
 
     impl Router {
         fn new() -> Self {
             Self {
                 by_method: RefCell::new(HashMap::new()),
+                calls: RefCell::new(Vec::new()),
             }
+        }
+
+        /// How many times `method` was called.
+        fn count(&self, method: &str) -> usize {
+            self.calls.borrow().iter().filter(|m| *m == method).count()
         }
 
         fn on(self, method: &str, bodies: &[&str]) -> Self {
@@ -517,6 +832,7 @@ mod tests {
     impl Http for Router {
         fn post_form(&self, url: &str, _: &str, _: &[(&str, &str)]) -> Result<Response, String> {
             let method = url.rsplit('/').next().unwrap_or_default();
+            self.calls.borrow_mut().push(method.to_string());
             let body = self
                 .by_method
                 .borrow_mut()
@@ -524,6 +840,14 @@ mod tests {
                 .filter(|queue| !queue.is_empty())
                 .map(|queue| queue.remove(0))
                 .unwrap_or_else(|| r#"{"ok":true}"#.to_string());
+            // "!500" answers with that HTTP status instead.
+            if let Some(status) = body.strip_prefix('!') {
+                let status = status.parse().expect("an HTTP status");
+                return Ok(Response {
+                    status,
+                    body: String::new(),
+                });
+            }
             Ok(Response { status: 200, body })
         }
     }
@@ -859,6 +1183,270 @@ mod tests {
         worker.handle(Command::Open("D1".into()));
         worker.poll();
         assert_eq!(threads(&events(&rx)).len(), 1);
+    }
+
+    fn live_message(channel: &str, thread_ts: Option<&str>, edited: bool) -> Change {
+        Change::Message {
+            channel: channel.into(),
+            thread_ts: thread_ts.map(Into::into),
+            edited,
+        }
+    }
+
+    /// The texts of the first `New` event, if any.
+    fn new_texts(events: &[Event]) -> Option<Vec<String>> {
+        events.iter().find_map(|event| match event {
+            Event::New { messages, .. } => Some(messages.iter().map(|m| m.text.clone()).collect()),
+            _ => None,
+        })
+    }
+
+    const ONE: &str = r#"{"ok":true,"messages":[{"ts":"1.0","user":"U2","text":"one"}]}"#;
+    const ONE_TWO: &str = r#"{"ok":true,"messages":[
+        {"ts":"2.0","user":"U2","text":"two"},{"ts":"1.0","user":"U2","text":"one"}]}"#;
+    const ONE_EDITED: &str =
+        r#"{"ok":true,"messages":[{"ts":"1.0","user":"U2","text":"one, fixed"}]}"#;
+
+    #[test]
+    fn a_live_message_in_the_open_conversation_is_shown() {
+        let (mut worker, rx) = worker(Router::new().on("conversations.history", &[ONE, ONE_TWO]));
+        worker.known_users.insert("U2".into());
+        worker.open("D1".into());
+        let _ = events(&rx);
+        worker.on_change(live_message("D1", None, false));
+        worker.apply_pending();
+        assert_eq!(new_texts(&events(&rx)), Some(vec!["two".to_string()]));
+    }
+
+    #[test]
+    fn a_burst_of_live_changes_fetches_once() {
+        let (mut worker, rx) = worker(Router::new().on("conversations.history", &[ONE, ONE_TWO]));
+        worker.known_users.insert("U2".into());
+        worker.open("D1".into());
+        for _ in 0..3 {
+            worker.on_change(live_message("D1", None, false));
+        }
+        worker.apply_pending();
+        worker.apply_pending();
+        let _ = events(&rx);
+        assert_eq!(worker.api.http().count("conversations.history"), 2);
+    }
+
+    #[test]
+    fn a_live_edit_reloads_the_open_conversation() {
+        let (mut worker, rx) =
+            worker(Router::new().on("conversations.history", &[ONE, ONE_EDITED]));
+        worker.known_users.insert("U2".into());
+        worker.open("D1".into());
+        let _ = events(&rx);
+        worker.on_change(live_message("D1", None, true));
+        worker.apply_pending();
+        let got = events(&rx);
+        match got.iter().find(|e| matches!(e, Event::History { .. })) {
+            Some(Event::History { messages, .. }) => assert_eq!(messages[0].text, "one, fixed"),
+            _ => panic!("expected the history again, got {got:?}"),
+        }
+        assert_eq!(new_texts(&got), None);
+    }
+
+    #[test]
+    fn a_live_reply_refreshes_the_open_thread() {
+        let (mut worker, rx) =
+            worker(Router::new().on("conversations.replies", &[THREAD, LONGER_THREAD]));
+        worker
+            .known_users
+            .extend(["U1".to_string(), "U2".to_string()]);
+        worker.handle(open_thread());
+        worker.on_change(live_message("C1", Some("1.0"), false));
+        worker.apply_pending();
+        assert_eq!(
+            threads(&events(&rx)),
+            [vec!["parent", "reply"], vec!["parent", "reply", "another"]]
+        );
+    }
+
+    #[test]
+    fn a_reply_in_another_thread_leaves_the_open_one_alone() {
+        let (mut worker, rx) =
+            worker(Router::new().on("conversations.replies", &[THREAD, LONGER_THREAD]));
+        worker
+            .known_users
+            .extend(["U1".to_string(), "U2".to_string()]);
+        worker.handle(open_thread());
+        worker.on_change(live_message("C1", Some("7.0"), false));
+        worker.apply_pending();
+        assert_eq!(threads(&events(&rx)).len(), 1);
+    }
+
+    const TWO_IMS: &str = r#"{"ok":true,"channels":[
+        {"id":"D1","is_im":true,"user":"U2"},{"id":"D2","is_im":true,"user":"U3"}]}"#;
+    const BOTH_READ: &str =
+        r#"{"ok":true,"ims":[{"id":"D1","latest":"1.0"},{"id":"D2","latest":"1.0"}]}"#;
+    const D2_UNREAD: &str = r#"{"ok":true,"ims":[{"id":"D1","latest":"1.0"},
+        {"id":"D2","latest":"5.0","has_unreads":true}]}"#;
+
+    #[test]
+    fn a_live_message_elsewhere_refreshes_unread_state_only() {
+        let (worker, rx) = worker(
+            Router::new()
+                .on("users.conversations", &[TWO_IMS])
+                .on("client.counts", &[BOTH_READ, D2_UNREAD]),
+        );
+        let mut worker = worker.knowing(vec![cached_bob()]);
+        worker.known_users.insert("U3".into());
+        worker.refresh();
+        let _ = events(&rx);
+        worker.on_change(live_message("D2", None, false));
+        worker.apply_pending();
+        match events(&rx).as_slice() {
+            [Event::Conversations(shown)] => {
+                assert_eq!(shown[0].id, "D2");
+                assert!(shown[0].unread);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(worker.api.http().count("users.conversations"), 1);
+        assert_eq!(worker.api.http().count("conversations.history"), 0);
+    }
+
+    #[test]
+    fn a_message_in_an_unknown_conversation_relists() {
+        let (mut worker, rx) = worker(Router::new().on("users.conversations", &[TWO_IMS, TWO_IMS]));
+        worker
+            .known_users
+            .extend(["U2".to_string(), "U3".to_string()]);
+        worker.refresh();
+        let _ = events(&rx);
+        worker.on_change(live_message("D9", None, false));
+        worker.apply_pending();
+        assert_eq!(worker.api.http().count("users.conversations"), 2);
+    }
+
+    #[test]
+    fn joining_a_conversation_relists() {
+        let (mut worker, _rx) = worker(Router::new());
+        worker.on_change(Change::Conversations);
+        worker.apply_pending();
+        assert_eq!(worker.api.http().count("users.conversations"), 1);
+    }
+
+    #[test]
+    fn polling_slows_down_while_live_and_speeds_up_when_lost() {
+        let (mut worker, _rx) = worker(Router::new());
+        assert_eq!(worker.poll_interval(), POLL_INTERVAL);
+        worker.on_change(Change::Hello);
+        assert_eq!(worker.poll_interval(), LIVE_POLL_INTERVAL);
+        worker.on_change(Change::Lost);
+        assert_eq!(worker.poll_interval(), POLL_INTERVAL);
+    }
+
+    #[test]
+    fn coming_back_live_catches_up_on_what_was_missed() {
+        let (mut worker, rx) = worker(
+            Router::new()
+                .on("conversations.history", &[ONE, ONE_TWO])
+                .on("conversations.replies", &[THREAD, LONGER_THREAD]),
+        );
+        worker
+            .known_users
+            .extend(["U1".to_string(), "U2".to_string()]);
+        worker.open("D1".into());
+        worker.handle(Command::OpenThread {
+            channel: "D1".into(),
+            thread_ts: "1.0".into(),
+        });
+        let _ = events(&rx);
+        worker.on_change(Change::Hello);
+        worker.apply_pending();
+        let got = events(&rx);
+        assert_eq!(new_texts(&got), Some(vec!["two".to_string()]));
+        assert_eq!(threads(&got).len(), 1);
+    }
+
+    #[test]
+    fn a_lost_connection_is_retried_later_and_later() {
+        let (mut worker, _rx) = worker(Router::new());
+        worker.on_change(Change::Lost);
+        let first = worker.live.retry_in();
+        worker.on_change(Change::Lost);
+        let second = worker.live.retry_in();
+        assert!(second > first, "{first:?} then {second:?}");
+        // Up long enough to count as stable: start over from the first wait.
+        worker.live.state = LiveState::Up {
+            since: Instant::now() - STABLE_AFTER,
+        };
+        worker.on_change(Change::Lost);
+        assert_eq!(worker.live.retry_in(), first);
+    }
+
+    #[test]
+    fn a_connection_dropped_right_after_hello_keeps_backing_off() {
+        let (mut worker, _rx) = worker(Router::new());
+        worker.on_change(Change::Lost);
+        let first = worker.live.retry_in();
+        worker.on_change(Change::Hello);
+        worker.on_change(Change::Lost);
+        assert!(worker.live.retry_in() > first);
+    }
+
+    #[test]
+    fn a_failed_live_fetch_is_kept_for_a_retry() {
+        let (mut worker, rx) =
+            worker(Router::new().on("conversations.history", &[ONE, "!503", ONE_EDITED]));
+        worker.known_users.insert("U2".into());
+        worker.open("D1".into());
+        let _ = events(&rx);
+        worker.on_change(live_message("D1", None, true));
+        worker.apply_pending();
+        assert!(
+            events(&rx)
+                .iter()
+                .all(|e| !matches!(e, Event::History { .. }))
+        );
+        worker.apply_pending();
+        let got = events(&rx);
+        match got.iter().find(|e| matches!(e, Event::History { .. })) {
+            Some(Event::History { messages, .. }) => assert_eq!(messages[0].text, "one, fixed"),
+            _ => panic!("expected the edit on retry, got {got:?}"),
+        }
+    }
+
+    #[test]
+    fn a_fatal_live_fetch_is_reported_not_retried() {
+        let (mut worker, rx) = worker(Router::new().on(
+            "conversations.history",
+            &[ONE, r#"{"ok":false,"error":"channel_not_found"}"#],
+        ));
+        worker.known_users.insert("U2".into());
+        worker.open("D1".into());
+        let _ = events(&rx);
+        worker.on_change(live_message("D1", None, false));
+        worker.apply_pending();
+        assert!(matches!(events(&rx).as_slice(), [.., Event::Error(_)]));
+        worker.apply_pending();
+        assert_eq!(worker.api.http().count("conversations.history"), 2);
+    }
+
+    #[test]
+    fn sending_a_thread_reply_refreshes_the_thread() {
+        let (mut worker, rx) =
+            worker(Router::new().on("conversations.replies", &[THREAD, LONGER_THREAD]));
+        worker
+            .known_users
+            .extend(["U1".to_string(), "U2".to_string()]);
+        worker.handle(open_thread());
+        worker.send("C1".into(), "another".into(), Some("1.0".into()));
+        assert_eq!(threads(&events(&rx)).len(), 2);
+    }
+
+    #[test]
+    fn polling_relists_by_time_not_by_count() {
+        let (mut worker, _rx) = worker(Router::new());
+        worker.poll();
+        assert_eq!(worker.api.http().count("users.conversations"), 0);
+        worker.listed = Instant::now() - RELIST_EVERY;
+        worker.poll();
+        assert_eq!(worker.api.http().count("users.conversations"), 1);
     }
 
     #[test]
