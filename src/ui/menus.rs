@@ -10,6 +10,7 @@ use objc2_app_kit::{
 use objc2_foundation::NSString;
 
 use meow::actions::QuickAction;
+use meow::settings::Settings;
 use meow::sprites::Coat;
 
 use super::controller::Controller;
@@ -106,34 +107,47 @@ pub fn install_main_menu(mtm: MainThreadMarker, controller: &Controller) {
     NSApplication::sharedApplication(mtm).setMainMenu(Some(&bar));
 }
 
-/// One item per coat, the current one checked.
-fn coat_menu(mtm: MainThreadMarker, target: &AnyObject, coat: Coat) -> Retained<NSMenu> {
-    let items: Vec<_> = Coat::ALL
-        .iter()
-        .enumerate()
-        .map(|(index, choice)| {
-            let entry = item(mtm, choice.name(), sel!(setCoat:), "", Some(target));
-            entry.setTag(index as isize);
-            entry
-        })
-        .collect();
-    let menu = menu(mtm, "Theme", &items);
-    mark_coat(&menu, coat);
-    menu
-}
-
-/// Checks `coat` in the theme menu.
-pub fn mark_coat(menu: &NSMenu, coat: Coat) {
-    for (index, choice) in Coat::ALL.iter().enumerate() {
-        let Some(entry) = menu.itemWithTag(index as isize) else {
-            continue;
-        };
-        let state = if *choice == coat {
+/// Fills the theme menu: one item per theme, the worn one checked, the
+/// built-in ones apart from the user's own, then adding one from a photo and
+/// removing the worn one when it is the user's.
+pub fn fill_coat_menu(
+    mtm: MainThreadMarker,
+    menu: &NSMenu,
+    target: &AnyObject,
+    settings: &Settings,
+    adding: bool,
+) {
+    menu.removeAllItems();
+    let built_in = Coat::ALL.len();
+    for (index, (name, coat)) in settings.coats().into_iter().enumerate() {
+        if index == built_in {
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+        }
+        let entry = item(mtm, &name, sel!(setCoat:), "", Some(target));
+        entry.setTag(index as isize);
+        let state = if coat == settings.coat {
             NSControlStateValueOn
         } else {
             NSControlStateValueOff
         };
         entry.setState(state);
+        menu.addItem(&entry);
+    }
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+    if adding {
+        menu.addItem(&label(mtm, "Looking at Your Cat…"));
+    } else {
+        menu.addItem(&item(
+            mtm,
+            "Add from Cat Photo…",
+            sel!(addCoatFromPhoto:),
+            "",
+            Some(target),
+        ));
+    }
+    if let Some(custom) = settings.current_custom() {
+        let title = format!("Remove \u{201c}{}\u{201d}", custom.name);
+        menu.addItem(&item(mtm, &title, sel!(removeCoat:), "", Some(target)));
     }
 }
 
@@ -142,7 +156,7 @@ pub fn cat_menu(
     mtm: MainThreadMarker,
     controller: &Controller,
     actions: &[QuickAction],
-    coat: Coat,
+    settings: &Settings,
     version: &str,
 ) -> (Retained<NSMenu>, Retained<NSMenu>) {
     let target: &AnyObject = controller;
@@ -175,7 +189,8 @@ pub fn cat_menu(
         item(mtm, "Feed", sel!(feed:), "", Some(target)),
         item(mtm, "Let a Mouse In", sel!(releaseMouse:), "", Some(target)),
     ]);
-    let coats = coat_menu(mtm, target, coat);
+    let coats = menu(mtm, "Theme", &[]);
+    fill_coat_menu(mtm, &coats, target, settings, false);
     let theme = submenu_item(mtm, &coats);
     theme.setTitle(&NSString::from_str("Theme"));
     items.extend([

@@ -35,6 +35,15 @@ use your regular Claude subscription, not API billing.
   across to another one: only the outer edges of your screens are walls.
 - **Pet the cat** by stroking it: move the mouse back and forth over it (no
   click). It closes its eyes and little hearts float up.
+- **Dress the cat like yours**: right-click the cat › **Theme** picks its coat
+  (Ginger, Willow, Alfie). **Add from Cat Photo…** asks for a photo of your
+  cat; Claude (Haiku, allowed only to read a shrunk copy of the photo) picks
+  the color of its fur, stripes, blaze, muzzle, legs, tail and each eye, and
+  names the theme (after the file's name when that looks like the cat's). The
+  cat sits with a `…` bubble meanwhile, then wears it. Your themes are listed
+  under the built-in ones; a new photo with the same name replaces the old
+  theme, and **Remove** deletes the one being worn. They are saved in
+  `~/Library/Application Support/Meow/settings.json`.
 
 Requests use **Haiku** (latest version) by default, the cheapest Claude model,
 which is plenty for fetching from connectors and summarizing; sub-agents use it
@@ -280,6 +289,7 @@ Claude's panel, filled with sample messages) as a PNG there, then quits. Snapsho
 | File                       | Role                                                      |
 |----------------------------|-----------------------------------------------------------|
 | `src/sprites.rs`           | Pixel art as text grids, composed into RGB frames         |
+| `src/cat_photo.rs`         | Themes from a cat photo: shrinking it, the prompt, reading the colors |
 | `src/behavior.rs`          | Cat state machine (walk, sleep, held, falling with gravity) |
 | `src/actions.rs`           | Quick actions: defaults and `actions.json` loading        |
 | `src/tasks.rs`             | Task list: merge, done state, persistence, `meow-tasks` parsing |

@@ -55,6 +55,16 @@ define_class!(
             }
         }
 
+        #[unsafe(method(addCoatFromPhoto:))]
+        fn add_coat_from_photo(&self, _sender: Option<&AnyObject>) {
+            push(UiEvent::AddCoatFromPhoto);
+        }
+
+        #[unsafe(method(removeCoat:))]
+        fn remove_coat(&self, _sender: Option<&AnyObject>) {
+            push(UiEvent::RemoveCoat);
+        }
+
         #[unsafe(method(feed:))]
         fn feed(&self, _sender: Option<&AnyObject>) {
             push(UiEvent::Feed);

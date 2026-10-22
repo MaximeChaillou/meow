@@ -309,6 +309,25 @@ impl Run {
         Self::spawn(env, prompt, None, model, ONLY_ALLOWED_MODE, &args)
     }
 
+    /// A one-off call whose only tool is reading files under `dir` (e.g. to
+    /// look at an image): no shell, no edits, no MCP servers.
+    pub fn start_reading(
+        env: &ClaudeEnv,
+        prompt: &str,
+        model: &str,
+        dir: &Path,
+    ) -> Result<Self, String> {
+        let allowed = read_rule(dir);
+        let args = [
+            "--tools",
+            "Read",
+            "--allowedTools",
+            allowed.as_str(),
+            "--strict-mcp-config",
+        ];
+        Self::spawn(env, prompt, None, model, ONLY_ALLOWED_MODE, &args)
+    }
+
     fn spawn(
         env: &ClaudeEnv,
         prompt: &str,
@@ -377,6 +396,12 @@ impl Drop for Run {
     fn drop(&mut self) {
         self.cancel();
     }
+}
+
+/// The permission rule reading anything under `dir`: an absolute path is
+/// written with a leading `//`.
+fn read_rule(dir: &Path) -> String {
+    format!("Read(/{}/**)", dir.display())
 }
 
 fn kill_group(process_group: libc::pid_t) {
@@ -589,6 +614,14 @@ mod tests {
             vec![ClaudeEvent::AgentFinished {
                 id: "toolu_1".into()
             }]
+        );
+    }
+
+    #[test]
+    fn reading_is_allowed_only_under_the_folder() {
+        assert_eq!(
+            read_rule(Path::new("/tmp/meow/photo")),
+            "Read(//tmp/meow/photo/**)"
         );
     }
 

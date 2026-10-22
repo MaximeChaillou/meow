@@ -69,7 +69,7 @@ thread_local! {
 
 struct App {
     mtm: MainThreadMarker,
-    _controller: Retained<Controller>,
+    controller: Retained<Controller>,
     cat_window: CatWindow,
     /// The part of the cat over the next screen, while it crosses over.
     cat_overflow: CatWindow,
@@ -95,6 +95,8 @@ struct App {
     settings_path: Option<PathBuf>,
     /// The theme submenu of the cat's menu, to check the current coat.
     coat_menu: Retained<NSMenu>,
+    /// A theme being made from a photo of the user's cat.
+    cat_photo: coat::CatPhotoState,
     cat: Cat,
     /// The screen height of the ground the cat's height is measured from:
     /// the bottom of the screen it is on.
@@ -156,7 +158,7 @@ pub fn start(mtm: MainThreadMarker) {
         mtm,
         &controller,
         &actions,
-        settings.coat,
+        &settings,
         &update::version_label(),
     );
     let cat_window = CatWindow::new(mtm, &cat_menu);
@@ -217,7 +219,7 @@ pub fn start(mtm: MainThreadMarker) {
         .unwrap_or((0.0, 0.0));
     let app = App {
         mtm,
-        _controller: controller,
+        controller,
         cat_window,
         cat_overflow: CatWindow::overflow(mtm),
         prop_window,
@@ -234,6 +236,7 @@ pub fn start(mtm: MainThreadMarker) {
         settings,
         settings_path,
         coat_menu,
+        cat_photo: coat::CatPhotoState::default(),
         cat: Cat::new(start_x),
         ground,
         rng: Rng::new(seed()),
@@ -378,6 +381,7 @@ impl App {
         self.poll_schedule();
         self.poll_agenda();
         self.poll_rsvp();
+        self.poll_cat_photo();
         self.poll_routines();
         self.poll_agents();
         self.poll_snapshot();
@@ -387,7 +391,8 @@ impl App {
 
     fn inputs(&self) -> Inputs {
         Inputs {
-            busy: self.run.is_some(),
+            // Looking at a photo of the user's cat shows too: it takes a while.
+            busy: self.run.is_some() || self.cat_photo.is_running(),
             chat_open: self.chat.is_visible(),
             unread: self.unread,
             news: self.activity.log.unread_count() > 0,
@@ -509,6 +514,8 @@ impl App {
             UiEvent::Drop => self.cat.release(),
             UiEvent::Stroke(distance) => self.cat.stroke(distance),
             UiEvent::SetCoat(index) => self.set_coat(index),
+            UiEvent::AddCoatFromPhoto => self.add_coat_from_photo(),
+            UiEvent::RemoveCoat => self.remove_coat(),
             UiEvent::Feed | UiEvent::ReleaseMouse => self.play(event),
             UiEvent::QuickAction(index) => self.quick_action(index),
             UiEvent::RunAction => self.rerun_shown_action(),

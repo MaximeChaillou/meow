@@ -6,7 +6,7 @@ mod coat;
 mod hanging;
 mod play;
 
-pub use coat::Coat;
+pub use coat::{Coat, Palette};
 pub use hanging::{Kick, SCRUFF};
 pub use play::{PROP_H, PROP_W, Prop, SWAT_PAW, render_prop};
 
@@ -623,6 +623,28 @@ mod tests {
         let willow = eye_colors(Coat::Willow, Pose::Stand);
         assert_eq!(willow[0], willow[1]);
         assert!(willow[0][2] > willow[0][0], "blue eyes");
+    }
+
+    #[test]
+    fn a_custom_coat_wears_its_own_palette() {
+        let palette = Palette {
+            fur: [10, 20, 30],
+            stripe: [40, 50, 60],
+            blaze: [70, 80, 90],
+            muzzle: [100, 110, 120],
+            legs: [130, 140, 150],
+            tail: [160, 170, 180],
+            near_eye: [0, 200, 0],
+            far_eye: [200, 0, 200],
+        };
+        let custom = Coat::Custom(palette);
+        assert_eq!(custom.color('o'), Some(palette.fur));
+        assert_eq!(custom.color('t'), Some(palette.tail));
+        assert_eq!(custom.color('k'), color('k'), "outline stays");
+        assert_eq!(
+            eye_colors(custom, Pose::Stand),
+            [palette.near_eye, palette.far_eye]
+        );
     }
 
     #[test]

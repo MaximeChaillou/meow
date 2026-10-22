@@ -5,6 +5,7 @@ pub mod agenda;
 pub mod agent;
 pub mod agent_run;
 pub mod behavior;
+pub mod cat_photo;
 pub mod claude;
 pub mod clock;
 pub mod conversations;

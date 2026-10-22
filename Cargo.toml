@@ -9,12 +9,13 @@ emojis = "0.9.1"
 global-hotkey = "0.9.0"
 libc = "0.2"
 objc2 = "0.6"
-objc2-app-kit = "0.3"
+objc2-app-kit = { version = "0.3", features = ["objc2-uniform-type-identifiers"] }
 objc2-core-foundation = "0.3"
 objc2-core-graphics = "0.3"
 objc2-core-text = "0.3"
 objc2-foundation = "0.3"
 objc2-quartz-core = "0.3"
+objc2-uniform-type-identifiers = "0.3"
 objc2-user-notifications = { version = "0.3", features = ["UNUserNotificationCenter", "UNNotificationRequest", "UNNotificationContent", "UNNotificationTrigger", "UNNotificationSettings", "UNNotificationSound", "block2"] }
 objc2-web-kit = "0.3"
 pulldown-cmark = { version = "0.13.4", default-features = false }

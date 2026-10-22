@@ -17,18 +17,23 @@ pub enum Coat {
     Willow,
     /// Grey and white bicolour: white blaze, muzzle and paws, odd eyes.
     Alfie,
+    /// Colors read from a photo of the user's own cat.
+    Custom(Palette),
 }
 
 /// Colors of the parts that change between coats.
-struct Palette {
-    fur: Rgb,
-    stripe: Rgb,
-    blaze: Rgb,
-    muzzle: Rgb,
-    legs: Rgb,
-    tail: Rgb,
-    near_eye: Rgb,
-    far_eye: Rgb,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Palette {
+    pub fur: Rgb,
+    /// Tabby stripes on the head and back; the fur color when there are none.
+    pub stripe: Rgb,
+    /// The forehead between the ears.
+    pub blaze: Rgb,
+    pub muzzle: Rgb,
+    pub legs: Rgb,
+    pub tail: Rgb,
+    pub near_eye: Rgb,
+    pub far_eye: Rgb,
 }
 
 const GINGER: Palette = Palette {
@@ -67,19 +72,22 @@ const ALFIE: Palette = Palette {
 impl Coat {
     pub const ALL: [Coat; 3] = [Coat::Ginger, Coat::Willow, Coat::Alfie];
 
+    /// The name of a built-in coat; custom ones are named in the settings.
     pub fn name(self) -> &'static str {
         match self {
             Coat::Ginger => "Ginger",
             Coat::Willow => "Willow",
             Coat::Alfie => "Alfie",
+            Coat::Custom(_) => "My Cat",
         }
     }
 
-    fn palette(self) -> &'static Palette {
+    fn palette(&self) -> &Palette {
         match self {
             Coat::Ginger => &GINGER,
             Coat::Willow => &WILLOW,
             Coat::Alfie => &ALFIE,
+            Coat::Custom(palette) => palette,
         }
     }
 
