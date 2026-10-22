@@ -180,6 +180,11 @@ now:
   know". Claude checks every 10 minutes (or as asked), read-only, and when it
   happens tells you with the details, or does what you asked.
 
+Claude also sees your scheduled tasks, active and finished (for 7 days), with
+what they do and their last result. So you can ask "start the Staples watch
+again", "move the report to 18:00" or "cancel the PR reminder" without
+repeating the details.
+
 The **Scheduled** page lists them with their next run, what they do and their
 last result; `×` deletes one. Results land in Activity. Runs happen in the
 background, one at a time, and never block the chat.

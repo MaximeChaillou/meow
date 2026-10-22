@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use meow::activity::{Kind, Note};
 use meow::claude::{ClaudeEvent, Run};
 use meow::conversations::ChatId;
-use meow::routines::{self, Check, Routines, Spec, Trigger};
+use meow::routines::{self, Change, Check, Routines, Spec, Trigger};
 
 use crate::ui::sidebar::Page;
 
@@ -75,20 +75,40 @@ impl RoutineState {
 }
 
 impl App {
-    /// The chat reported a scheduling request: add it and say so in `chat`.
-    pub(super) fn add_routine(&mut self, chat: &ChatId, spec: &Spec) {
+    /// The chat reported a scheduling request: add, change or cancel the
+    /// routine and say so in `chat`.
+    pub(super) fn apply_routine(&mut self, chat: &ChatId, spec: &Spec) {
         let now = now_secs();
-        match self.routines.routines.add(spec, now) {
-            Ok(routine) => {
-                let line = format!(
-                    "Scheduled: {} · {} (see Scheduled)",
+        let line = match self.routines.routines.apply(spec, now) {
+            Ok(Change::Added(routine)) => format!(
+                "Scheduled: {} · {} (see Scheduled)",
+                routine.name,
+                routine.schedule_label(now)
+            ),
+            Ok(Change::Updated(routine)) => {
+                self.stop_routine_run(routine.id);
+                format!(
+                    "Updated: {} · {} (see Scheduled)",
                     routine.name,
                     routine.schedule_label(now)
-                );
-                self.info_in(chat, &line);
-                self.routines_changed();
+                )
             }
-            Err(error) => self.error_in(chat, &format!("Could not schedule that: {error}.")),
+            Ok(Change::Cancelled(routine)) => {
+                self.stop_routine_run(routine.id);
+                format!("Cancelled: {}", routine.name)
+            }
+            Err(error) => {
+                return self.error_in(chat, &format!("Could not schedule that: {error}."));
+            }
+        };
+        self.info_in(chat, &line);
+        self.routines_changed();
+    }
+
+    /// Drops the run in flight for routine `id`, which changed or went away.
+    fn stop_routine_run(&mut self, id: u64) {
+        if self.routines.running() == Some(id) {
+            self.routines.active = None;
         }
     }
 
@@ -260,9 +280,7 @@ impl App {
             return;
         };
         // Dropping the run stops it.
-        if self.routines.running() == Some(id) {
-            self.routines.active = None;
-        }
+        self.stop_routine_run(id);
         if self.routines.routines.remove(id) {
             self.routines_changed();
         }

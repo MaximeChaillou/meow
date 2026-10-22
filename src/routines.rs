@@ -22,6 +22,8 @@ const MAX_CHECK_MINUTES: u64 = 24 * 60;
 pub const KEEP_DONE_SECS: u64 = 7 * 24 * 60 * 60;
 const MAX_TEXT_CHARS: usize = 1000;
 const MAX_FIRED: usize = 20;
+/// At most this many scheduled tasks are shown to Claude in a chat message.
+const MAX_LISTED: usize = 20;
 const DAY_SECS: u64 = 24 * 60 * 60;
 
 /// When a routine runs.
@@ -118,9 +120,12 @@ impl Routine {
 /// A request as Claude reports it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 pub struct Spec {
+    /// An existing routine to change (or restart, once finished) or cancel.
+    #[serde(default)]
+    pub id: Option<u64>,
     #[serde(default)]
     pub name: String,
-    /// "at" or "when".
+    /// "at", "when", or "cancel" (with `id`).
     #[serde(default)]
     pub kind: String,
     /// "YYYY-MM-DDTHH:MM", local time, for "at".
@@ -142,6 +147,14 @@ pub struct Spec {
 
 fn yes() -> bool {
     true
+}
+
+/// What a reported request did to the list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Change {
+    Added(Routine),
+    Updated(Routine),
+    Cancelled(Routine),
 }
 
 /// What a watch check found.
@@ -179,50 +192,40 @@ impl Routines {
         self.routines.iter().filter(|r| r.is_active()).count()
     }
 
-    /// Turns `spec` into a routine; the error says what is missing.
-    pub fn add(&mut self, spec: &Spec, now: u64) -> Result<&Routine, String> {
-        let then = clean(&spec.then).ok_or("the request does not say what to do")?;
-        let (trigger, next_at) = match spec.kind.trim() {
-            "at" => {
-                let text = spec.at.as_deref().ok_or("the request has no time")?;
-                let at = parse_local(text).ok_or_else(|| format!("unreadable time \"{text}\""))?;
-                if at <= now && !spec.daily {
-                    return Err(format!("{text} is already past"));
-                }
-                let mut next = at;
-                while next <= now {
-                    next += DAY_SECS;
-                }
-                (
-                    Trigger::At {
-                        at,
-                        daily: spec.daily,
-                    },
-                    next,
-                )
-            }
-            "when" => {
-                let condition = spec
-                    .condition
-                    .as_deref()
-                    .and_then(clean)
-                    .ok_or("the request does not say what to watch for")?;
-                let every = spec
-                    .every_minutes
-                    .unwrap_or(DEFAULT_CHECK_MINUTES)
-                    .clamp(MIN_CHECK_MINUTES, MAX_CHECK_MINUTES);
-                (
-                    Trigger::When {
-                        condition,
-                        every_minutes: every,
-                        once: spec.once,
-                    },
-                    // The first check comes soon, then every `every` minutes.
-                    now + 60,
-                )
-            }
-            other => return Err(format!("unknown kind \"{other}\"")),
+    /// Adds, changes or cancels a routine as `spec` asks; the error says what
+    /// is missing.
+    pub fn apply(&mut self, spec: &Spec, now: u64) -> Result<Change, String> {
+        let Some(id) = spec.id else {
+            return self.add(spec, now).cloned().map(Change::Added);
         };
+        let index = self
+            .routines
+            .iter()
+            .position(|r| r.id == id)
+            .ok_or_else(|| format!("there is no scheduled task #{id}"))?;
+        if spec.kind.trim() == "cancel" {
+            return Ok(Change::Cancelled(self.routines.remove(index)));
+        }
+        let (trigger, next_at, then) = build(spec, now)?;
+        let routine = &mut self.routines[index];
+        if let Some(name) = clean(&spec.name) {
+            routine.name = name;
+        }
+        routine.trigger = trigger;
+        routine.next_at = next_at;
+        routine.then = then;
+        routine.notify_only = spec.notify_only;
+        routine.status = Status::Active;
+        routine.done_at = None;
+        // A watch looks again from now on, still skipping what it reported.
+        routine.created_at = now;
+        routine.last_checked = None;
+        Ok(Change::Updated(routine.clone()))
+    }
+
+    /// Turns `spec` into a new routine; the error says what is missing.
+    pub fn add(&mut self, spec: &Spec, now: u64) -> Result<&Routine, String> {
+        let (trigger, next_at, then) = build(spec, now)?;
         let name = clean(&spec.name).unwrap_or_else(|| then.chars().take(60).collect());
         let routine = Routine {
             id: self.next_id,
@@ -241,6 +244,31 @@ impl Routines {
         self.next_id += 1;
         self.routines.push(routine);
         Ok(self.routines.last().expect("just pushed"))
+    }
+
+    /// The routines as Claude sees them in a chat message, one JSON object
+    /// per line in the shape of a request, so it can restart or change one.
+    pub fn describe_for_claude(&self, now: u64) -> String {
+        let shown = self.display();
+        if shown.is_empty() {
+            return "I have no scheduled tasks.".to_string();
+        }
+        let lines: Vec<String> = shown
+            .iter()
+            .take(MAX_LISTED)
+            .map(|routine| describe(routine, now).to_string())
+            .collect();
+        let hidden = shown.len().saturating_sub(MAX_LISTED);
+        let more = if hidden > 0 {
+            format!("\n({hidden} older finished ones not shown.)")
+        } else {
+            String::new()
+        };
+        format!(
+            "My scheduled tasks (\"active\" ones still run; \"done\" ones ran or fired and \
+             stopped):\n{}{more}",
+            lines.join("\n")
+        )
     }
 
     pub fn remove(&mut self, id: u64) -> bool {
@@ -345,8 +373,9 @@ pub fn default_path() -> Option<PathBuf> {
         .map(|home| PathBuf::from(home).join("Library/Application Support/Meow/routines.json"))
 }
 
-/// Added to chat messages: how to report a scheduling request.
-pub fn instruction(now: u64) -> String {
+/// Added to chat messages: the scheduled tasks there are, and how to report
+/// a scheduling request.
+pub fn instruction(now: u64, routines: &Routines) -> String {
     format!(
         "(Meow note, not from the user: {} If this message asks to do something later, at a \
          given time, or when something happens, do not do it now. Reply with one short \
@@ -357,8 +386,12 @@ pub fn instruction(now: u64) -> String {
          \"when\"), \"every_minutes\": how often to check (default {DEFAULT_CHECK_MINUTES}), \
          \"once\": false to keep watching after the first time, \"then\": what to do, written \
          as an instruction, \"notify_only\": true when it only means letting me know}}. \
-         Otherwise ignore this note.)",
-        clock::describe(now)
+         To change one of my scheduled tasks, or start a finished one again, send the same \
+         block with its \"id\" and all its fields as they should now be (copy the ones that \
+         stay); to cancel one, send {{\"kind\": \"cancel\", \"id\": its id}}. Only one block \
+         per reply. Otherwise ignore this note.\n\n{})",
+        clock::describe(now),
+        routines.describe_for_claude(now)
     )
 }
 
@@ -426,6 +459,113 @@ pub fn parse_check(answer: &str) -> Result<Check, String> {
     serde_json::from_str(&body).map_err(|e| format!("the check's result is not valid JSON ({e})"))
 }
 
+/// The trigger, first run and action `spec` asks for.
+fn build(spec: &Spec, now: u64) -> Result<(Trigger, u64, String), String> {
+    let then = clean(&spec.then).ok_or("the request does not say what to do")?;
+    let (trigger, next_at) = match spec.kind.trim() {
+        "at" => {
+            let text = spec.at.as_deref().ok_or("the request has no time")?;
+            let at = parse_local(text).ok_or_else(|| format!("unreadable time \"{text}\""))?;
+            if at <= now && !spec.daily {
+                return Err(format!("{text} is already past"));
+            }
+            let mut next = at;
+            while next <= now {
+                next += DAY_SECS;
+            }
+            (
+                Trigger::At {
+                    at,
+                    daily: spec.daily,
+                },
+                next,
+            )
+        }
+        "when" => {
+            let condition = spec
+                .condition
+                .as_deref()
+                .and_then(clean)
+                .ok_or("the request does not say what to watch for")?;
+            let every = spec
+                .every_minutes
+                .unwrap_or(DEFAULT_CHECK_MINUTES)
+                .clamp(MIN_CHECK_MINUTES, MAX_CHECK_MINUTES);
+            (
+                Trigger::When {
+                    condition,
+                    every_minutes: every,
+                    once: spec.once,
+                },
+                now + 60,
+            )
+        }
+        "cancel" => return Err("cancelling needs the task's id".to_string()),
+        other => return Err(format!("unknown kind \"{other}\"")),
+    };
+    Ok((trigger, next_at, then))
+}
+
+/// One routine as Claude sees it.
+fn describe(routine: &Routine, now: u64) -> serde_json::Value {
+    use serde_json::Value;
+    let status = if routine.is_active() {
+        "active"
+    } else {
+        "done"
+    };
+    let mut fields: Vec<(&str, Value)> = vec![
+        ("id", routine.id.into()),
+        ("status", status.into()),
+        ("name", routine.name.clone().into()),
+    ];
+    match &routine.trigger {
+        Trigger::At { at, daily } => {
+            let shown = if routine.is_active() {
+                routine.next_at
+            } else {
+                *at
+            };
+            fields.push(("kind", "at".into()));
+            fields.push(("at", local_text(shown).into()));
+            fields.push(("daily", (*daily).into()));
+        }
+        Trigger::When {
+            condition,
+            every_minutes,
+            once,
+        } => {
+            fields.push(("kind", "when".into()));
+            fields.push(("condition", condition.clone().into()));
+            fields.push(("every_minutes", (*every_minutes).into()));
+            fields.push(("once", (*once).into()));
+        }
+    }
+    fields.push(("then", routine.then.clone().into()));
+    fields.push(("notify_only", routine.notify_only.into()));
+    if let Some(result) = &routine.last_result {
+        fields.push(("last_result", result.clone().into()));
+    }
+    if let Some(done) = routine.done_at {
+        fields.push(("finished", clock::when_label(done, now).into()));
+    }
+    Value::Object(
+        fields
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value))
+            .collect(),
+    )
+}
+
+/// "2026-10-20T17:00" on the local clock, as [`parse_local`] reads it.
+fn local_text(at: u64) -> Option<String> {
+    let t = clock::local(at)?;
+    Some(format!(
+        "{}-{:02}-{:02}T{:02}:{:02}",
+        t.year, t.month, t.day, t.hour, t.minute
+    ))
+}
+
 /// "2026-10-20T17:00" (or with a space, or seconds) on the local clock.
 fn parse_local(text: &str) -> Option<u64> {
     let text = text.trim();
@@ -479,11 +619,7 @@ mod tests {
     }
 
     fn local(at: u64) -> String {
-        let t = clock::local(at).unwrap();
-        format!(
-            "{}-{:02}-{:02}T{:02}:{:02}",
-            t.year, t.month, t.day, t.hour, t.minute
-        )
+        local_text(at).unwrap()
     }
 
     #[test]
@@ -660,6 +796,106 @@ mod tests {
         routines.prune(NOW + KEEP_DONE_SECS + 1);
         assert!(routines.get(done).is_none() && routines.get(soon).is_some());
         assert!(routines.remove(soon) && !routines.remove(soon));
+    }
+
+    #[test]
+    fn finished_routines_can_be_started_again() {
+        let mut routines = Routines::default();
+        let id = routines.add(&watch_spec(), NOW).unwrap().id;
+        let found = Check {
+            happened: true,
+            summary: "Staples answered".into(),
+            details: "".into(),
+        };
+        routines.record_check(id, NOW + 60, &found);
+        assert!(!routines.get(id).unwrap().is_active());
+        let again = Spec {
+            id: Some(id),
+            ..watch_spec()
+        };
+        let Ok(Change::Updated(routine)) = routines.apply(&again, NOW + 3600) else {
+            panic!("expected an update");
+        };
+        assert!(routine.is_active() && routine.done_at.is_none());
+        assert_eq!(routine.id, id);
+        assert_eq!(routine.next_at, NOW + 3600 + 60);
+        assert_eq!(
+            routine.fired,
+            ["Staples answered"],
+            "still not reported twice"
+        );
+        assert_eq!(routines.active_count(), 1);
+    }
+
+    #[test]
+    fn routines_can_be_rescheduled_and_cancelled() {
+        let mut routines = Routines::default();
+        let id = routines
+            .add(&at_spec(&local(NOW + 3600), false), NOW)
+            .unwrap()
+            .id;
+        let later = Spec {
+            id: Some(id),
+            name: String::new(),
+            ..at_spec(&local(NOW + 7200), true)
+        };
+        let Ok(Change::Updated(routine)) = routines.apply(&later, NOW) else {
+            panic!("expected an update");
+        };
+        assert_eq!(
+            routine.name, "Send report",
+            "an empty name keeps the old one"
+        );
+        assert_eq!(routine.next_at, NOW + 7200);
+        let cancel = Spec {
+            id: Some(id),
+            kind: "cancel".into(),
+            ..Spec::default()
+        };
+        assert!(matches!(
+            routines.apply(&cancel, NOW),
+            Ok(Change::Cancelled(_))
+        ));
+        assert!(routines.get(id).is_none());
+        assert!(routines.apply(&cancel, NOW).is_err(), "unknown id");
+        let no_id = Spec { id: None, ..cancel };
+        assert!(routines.apply(&no_id, NOW).is_err());
+    }
+
+    #[test]
+    fn claude_sees_every_routine_as_a_request() {
+        let mut routines = Routines::default();
+        assert!(instruction(NOW, &routines).contains("no scheduled tasks"));
+        routines
+            .add(&at_spec(&local(NOW + 3600), true), NOW)
+            .unwrap();
+        let watch = routines.add(&watch_spec(), NOW).unwrap().id;
+        routines.record_check(
+            watch,
+            NOW + 60,
+            &Check {
+                happened: true,
+                summary: "Staples answered".into(),
+                details: "".into(),
+            },
+        );
+        let text = routines.describe_for_claude(NOW + 120);
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .skip(1)
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["status"], "active");
+        assert_eq!(lines[0]["at"], local(NOW + 3600));
+        assert_eq!(lines[1]["status"], "done");
+        assert_eq!(lines[1]["condition"], "Staples replied to Cyril's email");
+        assert_eq!(lines[1]["last_result"], "Staples answered");
+        // A listed routine reads back as a request for itself.
+        let spec: Spec = serde_json::from_value(lines[1].clone()).unwrap();
+        assert_eq!(spec.id, Some(watch));
+        assert!(routines.apply(&spec, NOW + 180).is_ok());
+        assert!(routines.get(watch).unwrap().is_active());
     }
 
     #[test]

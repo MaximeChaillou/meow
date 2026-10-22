@@ -52,11 +52,12 @@ impl App {
         if let Some(request) = agent_request(text) {
             return self.request_agent_in_chat(&id, text, request);
         }
-        // Claude reports "do this later" requests instead of doing them now.
+        // Claude reports "do this later" requests instead of doing them now,
+        // and sees the scheduled tasks there are, to change or restart them.
         let prompt = format!(
             "{}\n\n{}",
             self.prompt_for(&id, text),
-            routines::instruction(now_secs())
+            routines::instruction(now_secs(), &self.routines.routines)
         );
         self.start_request(&id, text, &prompt, RunKind::Message);
     }
@@ -244,7 +245,7 @@ impl App {
                 }
                 self.finish_run(&shown);
                 if let Some(spec) = schedule {
-                    self.add_routine(&id, &spec);
+                    self.apply_routine(&id, &spec);
                 }
                 if new_plan && self.conversations.active() == &id {
                     self.show_conversation(id);
