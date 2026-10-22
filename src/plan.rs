@@ -191,6 +191,9 @@ impl Event {
     }
 
     fn cleaned(self) -> Option<Self> {
+        if self.calendar.as_deref().is_some_and(is_room_calendar) {
+            return None;
+        }
         let id = self.id.as_deref().and_then(clean_text);
         Some(Self {
             title: clean_text(&self.title)?,
@@ -302,6 +305,14 @@ fn clean_text(text: &str) -> Option<String> {
     (!text.is_empty()).then(|| text.chars().take(MAX_TEXT_CHARS).collect())
 }
 
+/// A meeting room's calendar: its events are the room's bookings, not mine.
+fn is_room_calendar(calendar: &str) -> bool {
+    calendar
+        .trim()
+        .to_ascii_lowercase()
+        .ends_with("@resource.calendar.google.com")
+}
+
 /// A video or web link, which is no meeting room.
 fn is_link(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
@@ -338,7 +349,9 @@ pub fn instruction(now: u64) -> String {
          sentences summing up the day, then end with a fenced code block with the info string \
          `{PLAN_FENCE}` holding one JSON object:\n\
          {{\"summary\": the same one or two sentences,\n \
-         \"agenda\": today's events in order, declined ones included, each {EVENT_SHAPE},\n \
+         \"agenda\": today's events on my primary calendar in order, declined ones included, \
+         never the bookings of meeting rooms or other calendars I only subscribe to, each \
+         {EVENT_SHAPE},\n \
          \"focus\": the 3 things to tackle first, most important first, each {{\"title\": short \
          imperative title, \"why\": why it matters today in a few words, \"source\": Linear, \
          GitHub, Slack, Gmail…, \"url\": link or null}},\n \
@@ -431,6 +444,21 @@ mod tests {
             (item.title.as_str(), &item.why, &item.url),
             ("Reply to Bo", &None, &None)
         );
+    }
+
+    #[test]
+    fn cleaning_drops_meeting_room_bookings() {
+        let room = Event {
+            calendar: Some("c_1886ea63@resource.calendar.google.com".into()),
+            ..event(Some("09:00"), None)
+        };
+        let shared = Event {
+            calendar: Some("team@group.calendar.google.com".into()),
+            ..event(Some("10:00"), None)
+        };
+        let agenda = clean_agenda(vec![room, shared, event(Some("11:00"), None)]);
+        let starts: Vec<_> = agenda.iter().map(|e| e.start.as_deref()).collect();
+        assert_eq!(starts, [Some("10:00"), Some("11:00")]);
     }
 
     #[test]

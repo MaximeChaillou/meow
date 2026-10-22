@@ -21,7 +21,9 @@ pub fn prompt(now: u64) -> String {
     format!(
         "{} Background refresh of my agenda. Only read: do not create, modify, answer or \
          delete any event. Use the calendar tools directly and keep it quick.\n\n\
-         List all of today's events on my primary calendar, declined ones included.\n\n\
+         List all of today's events on my primary calendar, declined ones included. Skip \
+         the other calendars I subscribe to, such as meeting rooms: their events are not \
+         mine.\n\n\
          Reply with only a fenced code block with the info string `{AGENDA_FENCE}` holding \
          {{\"agenda\": [each event as {EVENT_SHAPE}]}}, with an empty list when there is \
          nothing today.",

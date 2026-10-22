@@ -106,7 +106,9 @@ pub fn defaults() -> Vec<QuickAction> {
                     &[
                         (
                             "Google Calendar",
-                            "today's events with times and attendees.",
+                            "today's events on my primary calendar only, with times and \
+                             attendees. Skip the other calendars I subscribe to, such as \
+                             meeting rooms: their events are not mine.",
                         ),
                         LINEAR,
                         GITHUB,
