@@ -1,6 +1,9 @@
-use super::hairball::{HACK_SECONDS, SPARKLE_SECONDS, SPIT_SECONDS, WIPE_DISTANCE, WIPE_PER_TAP};
+use super::hairball::{
+    GOBBLE_SECONDS, HACK_SECONDS, SNIFF_SECONDS, SPARKLE_SECONDS, SPIT_SECONDS, WIPE_DISTANCE,
+    WIPE_PER_TAP,
+};
 use super::*;
-use crate::sprites::{Prop, SPIT};
+use crate::sprites::{Bubble, Prop, SPIT};
 
 const IDLE: Inputs = Inputs {
     busy: false,
@@ -162,4 +165,59 @@ fn idle_cat_coughs_up_a_hairball_now_and_then() {
         (coughs as f64 - expected).abs() < expected / 2.0,
         "{coughs}"
     );
+}
+
+/// Dédé, idle and staying put.
+fn idle_pig(x: f64) -> Cat {
+    let mut pig = idle_cat(x);
+    pig.set_pig(true);
+    pig
+}
+
+#[test]
+fn dede_squats_poops_behind_him_and_turns_around() {
+    let mut pig = idle_pig(400.0);
+    assert!(pig.cough_up());
+    run(&mut pig, TICK);
+    assert!(matches!(pig.look(IDLE).pose, Pose::Squat(_)));
+    run(&mut pig, HACK_SECONDS);
+    assert_eq!(hairball(&pig), Some(Prop::Poop(3)));
+    let poop = pig.hairball().unwrap();
+    assert!(poop.x < 400, "behind a pig facing right");
+    assert_eq!(pig.facing, Facing::Left, "turned around to it");
+    assert_eq!(pig.activity(), Activity::Gobbling);
+    assert!(matches!(pig.look(IDLE).bubble, Bubble::Hearts(_)));
+}
+
+#[test]
+fn dede_eats_his_poop_and_leaves_nothing() {
+    let mut pig = idle_pig(400.0);
+    pig.cough_up();
+    run(
+        &mut pig,
+        HACK_SECONDS + SNIFF_SECONDS + GOBBLE_SECONDS / 2.0,
+    );
+    assert!(matches!(pig.look(IDLE).pose, Pose::Eat(_)));
+    assert!(matches!(hairball(&pig), Some(Prop::Poop(level)) if level < 3));
+    run(&mut pig, GOBBLE_SECONDS / 2.0 + 0.1);
+    assert_eq!(hairball(&pig), None, "eaten, no sparkle");
+    assert_eq!(pig.activity(), Activity::Idle);
+}
+
+#[test]
+fn wiping_dedes_poop_first_spoils_his_meal() {
+    let mut pig = idle_pig(400.0);
+    pig.cough_up();
+    run(&mut pig, HACK_SECONDS + TICK);
+    pig.wipe_hairball(WIPE_DISTANCE);
+    run(&mut pig, TICK);
+    assert_eq!(pig.activity(), Activity::Idle);
+    assert!(matches!(hairball(&pig), Some(Prop::Sparkle(_))));
+}
+
+#[test]
+fn a_cat_still_coughs_up_hairballs() {
+    let cat = cat_with_hairball(400.0);
+    assert_eq!(hairball(&cat), Some(Prop::Hairball(3)));
+    assert_eq!(cat.activity(), Activity::Idle);
 }

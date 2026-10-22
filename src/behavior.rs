@@ -89,8 +89,10 @@ pub enum Activity {
     Chasing,
     /// After the mouse pointer, which was shaken nearby.
     Hunting,
-    /// Hunched over, coughing up a hairball.
+    /// Hunched over, coughing up a hairball (or Dédé squatting to poop).
     Hacking,
+    /// Dédé, turned around to his poop: sniffing it, then eating it.
+    Gobbling,
 }
 
 /// Where the cat may go: `x` is the window's left edge, `y` its height above the ground.
@@ -234,6 +236,10 @@ pub struct Cat {
     hack_left: f64,
     /// Left on the floor until the user wipes it away.
     hairball: Option<Hairball>,
+    /// Dédé the pig: he poops instead of coughing up hairballs.
+    pig: bool,
+    /// Seconds since Dédé turned around to his poop.
+    gobble_for: f64,
     activity: Activity,
     time_left: f64,
     clock: f64,
@@ -272,6 +278,8 @@ impl Cat {
             catch_cooldown: 0.0,
             hack_left: 0.0,
             hairball: None,
+            pig: false,
+            gobble_for: 0.0,
             activity: Activity::Walking,
             time_left: 6.0,
             clock: 0.0,
@@ -371,7 +379,8 @@ impl Cat {
             | Activity::Eating
             | Activity::Chasing
             | Activity::Hunting
-            | Activity::Hacking => {}
+            | Activity::Hacking
+            | Activity::Gobbling => {}
         }
         self.x = self.x.clamp(bounds.min_x, bounds.max_x);
         self.y = 0.0;
@@ -398,6 +407,7 @@ impl Cat {
             Activity::Chasing => return self.chase(dt, bounds, rng),
             Activity::Hunting => return self.hunt(dt, bounds, rng),
             Activity::Hacking => return self.hack(dt, bounds),
+            Activity::Gobbling => return self.gobble(dt),
             Activity::Walking => self.walk(dt, bounds.min_x, bounds.max_x),
             _ => {}
         }
@@ -524,7 +534,8 @@ impl Cat {
             | Activity::Eating
             | Activity::Chasing
             | Activity::Hunting
-            | Activity::Hacking => (Activity::Walking, 4.0, 10.0),
+            | Activity::Hacking
+            | Activity::Gobbling => (Activity::Walking, 4.0, 10.0),
         };
         if activity == Activity::Walking {
             self.facing = if rng.next_f64() < 0.5 {
@@ -644,6 +655,7 @@ impl Cat {
                 self.play_pose().unwrap_or(Pose::Stand)
             }
             Activity::Hacking => self.hack_pose(),
+            Activity::Gobbling => self.gobble_pose(),
             Activity::Walking => Pose::Walk((self.clock * WALK_FPS) as u64 as u8 % 4),
             Activity::Sleeping => Pose::Sleep,
             Activity::Held => self.dangle_pose(),
@@ -664,7 +676,7 @@ impl Cat {
         } else if self.activity == Activity::Sleeping {
             Bubble::Zzz((self.clock * ZZZ_FPS) as u64 as u8)
         } else {
-            Bubble::None
+            self.gobble_bubble().unwrap_or(Bubble::None)
         };
         Look {
             pose,

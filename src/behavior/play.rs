@@ -9,9 +9,9 @@ use super::{Activity, Bounds, Cat, GRAVITY, Rng, WALK_FPS};
 pub const CAT_WIDTH: f64 = CANVAS_W as f64 * SCALE;
 pub const PROP_WIDTH: f64 = PROP_W as f64 * SCALE;
 /// The bowl tucks this far under the cat's lowered head.
-const BOWL_OVERLAP: f64 = 2.0 * SCALE;
+pub(super) const BOWL_OVERLAP: f64 = 2.0 * SCALE;
 pub const MEAL_SECONDS: f64 = 8.0;
-const BITE_FPS: f64 = 4.0;
+pub(super) const BITE_FPS: f64 = 4.0;
 const KIBBLE_LEVELS: f64 = 3.0;
 
 /// The mouse outruns the cat, so it always gets away.
@@ -99,6 +99,7 @@ impl Cat {
                 | Activity::Chasing
                 | Activity::Hunting
                 | Activity::Hacking
+                | Activity::Gobbling
         )
     }
 

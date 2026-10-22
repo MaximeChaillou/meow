@@ -107,6 +107,9 @@ pub fn install_main_menu(mtm: MainThreadMarker, controller: &Controller) {
     NSApplication::sharedApplication(mtm).setMainMenu(Some(&bar));
 }
 
+/// Tags the cat menu's hairball item, retitled for Dédé.
+const HAIRBALL_TAG: isize = -1;
+
 /// Fills the theme menu: one item per theme, the worn one checked, the
 /// built-in ones apart from the user's own, then adding one from a photo and
 /// removing the worn one when it is the user's.
@@ -118,6 +121,20 @@ pub fn fill_coat_menu(
     adding: bool,
 ) {
     menu.removeAllItems();
+    // Dédé poops where the cats cough up hairballs.
+    let hairball = if settings.coat.is_pig() {
+        "Poop"
+    } else {
+        "Hairball"
+    };
+    // SAFETY: plain getter; the cat's menu lives as long as the app.
+    let parent = unsafe { menu.supermenu() };
+    let sibling = parent
+        .as_deref()
+        .and_then(|parent| parent.itemWithTag(HAIRBALL_TAG));
+    if let Some(entry) = sibling {
+        entry.setTitle(&NSString::from_str(hairball));
+    }
     let built_in = Coat::ALL.len();
     for (index, (name, coat)) in settings.coats().into_iter().enumerate() {
         if index == built_in {
@@ -188,10 +205,11 @@ pub fn cat_menu(
     items.extend([
         item(mtm, "Feed", sel!(feed:), "", Some(target)),
         item(mtm, "Let a Mouse In", sel!(releaseMouse:), "", Some(target)),
-        item(mtm, "Hairball", sel!(coughUp:), "", Some(target)),
     ]);
+    let hairball = item(mtm, "", sel!(coughUp:), "", Some(target));
+    hairball.setTag(HAIRBALL_TAG);
+    items.push(hairball);
     let coats = menu(mtm, "Theme", &[]);
-    fill_coat_menu(mtm, &coats, target, settings, false);
     let theme = submenu_item(mtm, &coats);
     theme.setTitle(&NSString::from_str("Theme"));
     items.extend([
@@ -200,5 +218,8 @@ pub fn cat_menu(
         label(mtm, version),
         item(mtm, "Quit Meow", sel!(quit:), "", Some(target)),
     ]);
-    (menu(mtm, "Meow", &items), coats)
+    let cat_menu = menu(mtm, "Meow", &items);
+    // Once in the cat's menu, so it can title the hairball item too.
+    fill_coat_menu(mtm, &coats, target, settings, false);
+    (cat_menu, coats)
 }

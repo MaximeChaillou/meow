@@ -50,7 +50,7 @@ pub(super) fn draw_hacking(grid: &mut Grid, phase: u8) {
     let phase = usize::from(phase).min(HACK_HEADS.len() - 1);
     let (drop, reach) = HACK_HEADS[phase];
     let hunched = phase > 0;
-    let mut standing = Grid::new();
+    let mut standing = grid.blank();
     super::draw_standing(&mut standing, true, [0; 4]);
     let back = BUBBLE_H + HEAD_TOP.len() + 2..BUBBLE_H + LEG_ROW;
     let is_head = |x: usize, y: usize| x >= HEAD_X && (BUBBLE_H..BUBBLE_H + HEAD_ROWS).contains(&y);

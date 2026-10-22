@@ -1,10 +1,11 @@
 //! Now and then the cat coughs up a hairball, which stays on the floor until
-//! the user wipes it away.
+//! the user wipes it away. Dédé the pig poops instead, then turns around and
+//! eats it, unless the user wipes it first.
 
-use crate::sprites::{Facing, MOUTH, Pose, Prop, SCALE, SPIT};
+use crate::sprites::{Bubble, Facing, MOUTH, Pose, Prop, SCALE, SPIT};
 
-use super::play::{CAT_WIDTH, PROP_WIDTH};
-use super::{Activity, Bounds, Cat};
+use super::play::{BITE_FPS, BOWL_OVERLAP, CAT_WIDTH, PROP_WIDTH};
+use super::{Activity, Bounds, Cat, HEARTS_FPS};
 
 /// Chance, when an idle cat picks what to do next, of coughing up a hairball.
 pub const HAIRBALL_CHANCE: f64 = 0.02;
@@ -22,6 +23,9 @@ const DIRT_LEVELS: f64 = 3.0;
 /// The spot glints this long once wiped clean.
 pub const SPARKLE_SECONDS: f64 = 0.8;
 const SPARKLE_FPS: f64 = 6.0;
+/// Dédé admires his poop this long, then eats it in this long.
+pub const SNIFF_SECONDS: f64 = 1.2;
+pub const GOBBLE_SECONDS: f64 = 4.0;
 
 /// A hairball on the floor, where the cat left it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -33,10 +37,17 @@ pub(super) struct Hairball {
     wiped: f64,
     /// Seconds since it was wiped clean, while the spot glints.
     clean_for: Option<f64>,
+    /// Dédé's poop rather than a hairball.
+    poop: bool,
 }
 
 impl Cat {
-    /// Starts coughing up a hairball, unless one is already on the floor or
+    /// Dédé is a pig: from now on he poops instead of coughing up hairballs.
+    pub fn set_pig(&mut self, pig: bool) {
+        self.pig = pig;
+    }
+
+    /// Starts coughing up a hairball (or pooping, for Dédé), unless one is already on the floor or
     /// the cat is busy with something else. Returns whether it started.
     pub fn cough_up(&mut self) -> bool {
         let free = matches!(
@@ -58,14 +69,78 @@ impl Cat {
             return;
         }
         self.hack_left = 0.0;
+        if self.pig {
+            return self.drop_poop(bounds);
+        }
         self.hairball = Some(Hairball {
             x: self.spit_spot(bounds),
             facing: self.facing,
             wiped: 0.0,
             clean_for: None,
+            poop: false,
         });
         self.activity = Activity::Idle;
         self.time_left = 2.0;
+    }
+
+    /// The poop lands behind Dédé, right where his bowl would be once he
+    /// turns around; and he turns around.
+    fn drop_poop(&mut self, bounds: Bounds) {
+        let behind = match self.facing {
+            Facing::Right => Facing::Left,
+            Facing::Left => Facing::Right,
+        };
+        let x = match behind {
+            Facing::Right => self.x + CAT_WIDTH - BOWL_OVERLAP,
+            Facing::Left => self.x - PROP_WIDTH + BOWL_OVERLAP,
+        };
+        self.hairball = Some(Hairball {
+            x: x.clamp(bounds.min_x, bounds.max_x + CAT_WIDTH - PROP_WIDTH),
+            facing: behind,
+            wiped: 0.0,
+            clean_for: None,
+            poop: true,
+        });
+        self.facing = behind;
+        self.activity = Activity::Gobbling;
+        self.gobble_for = 0.0;
+    }
+
+    /// One tick of Dédé at his poop: he looks at it fondly, then eats it
+    /// bite by bite. Wiped away under his nose, he gives up.
+    pub(super) fn gobble(&mut self, dt: f64) {
+        self.gobble_for += dt;
+        let eating = self.gobble_for - SNIFF_SECONDS;
+        let Some(poop) = self.hairball.as_mut().filter(|h| h.clean_for.is_none()) else {
+            self.activity = Activity::Idle;
+            self.time_left = 2.0;
+            return;
+        };
+        if eating <= 0.0 {
+            return;
+        }
+        // What he eats counts like scrubbing, so the poop shrinks the same way.
+        poop.wiped = poop.wiped.max(eating / GOBBLE_SECONDS * WIPE_DISTANCE);
+        if poop.wiped >= WIPE_DISTANCE {
+            // Eaten: nothing left to glint.
+            self.hairball = None;
+            self.activity = Activity::Idle;
+            self.time_left = 2.0;
+        }
+    }
+
+    /// Sniffing his poop, eyes shut with delight, then head down in it.
+    pub(super) fn gobble_pose(&self) -> Pose {
+        if self.gobble_for < SNIFF_SECONDS {
+            return Pose::Blink;
+        }
+        Pose::Eat(((self.gobble_for - SNIFF_SECONDS) * BITE_FPS) as u64 as u8)
+    }
+
+    /// Hearts while Dédé admires his poop.
+    pub(super) fn gobble_bubble(&self) -> Option<Bubble> {
+        let admiring = self.activity == Activity::Gobbling && self.gobble_for < SNIFF_SECONDS;
+        admiring.then_some(Bubble::Hearts((self.gobble_for * HEARTS_FPS) as u64 as u8))
     }
 
     /// Left edge of the hairball's window: just past the jaw, on the screen.
@@ -79,11 +154,12 @@ impl Cat {
     }
 
     pub(super) fn hack_pose(&self) -> Pose {
+        let pose = if self.pig { Pose::Squat } else { Pose::Hack };
         if self.hack_left <= SPIT_SECONDS {
-            return Pose::Hack(SPIT);
+            return pose(SPIT);
         }
         let heaves = (HACK_SECONDS - self.hack_left) * HEAVE_FPS;
-        Pose::Hack(heaves as u64 as u8 % 2)
+        pose(heaves as u64 as u8 % 2)
     }
 
     /// The spot glints for a moment once wiped clean, then is gone.
@@ -126,7 +202,12 @@ impl Cat {
             Some(clean_for) => Prop::Sparkle((clean_for * SPARKLE_FPS) as u64 as u8),
             None => {
                 let left = 1.0 - hairball.wiped / WIPE_DISTANCE;
-                Prop::Hairball((left * DIRT_LEVELS).ceil().clamp(1.0, DIRT_LEVELS) as u8)
+                let left = (left * DIRT_LEVELS).ceil().clamp(1.0, DIRT_LEVELS) as u8;
+                if hairball.poop {
+                    Prop::Poop(left)
+                } else {
+                    Prop::Hairball(left)
+                }
             }
         };
         Some(super::PropView {

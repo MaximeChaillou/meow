@@ -56,7 +56,7 @@ fn shake_at(cat: &mut Cat, x: f64, y: f64, seconds: f64) {
 fn bowl_level(cat: &Cat) -> Option<u8> {
     match cat.prop()?.prop {
         Prop::Bowl(level) => Some(level),
-        Prop::Mouse(_) | Prop::Hairball(_) | Prop::Sparkle(_) => None,
+        Prop::Mouse(_) | Prop::Hairball(_) | Prop::Sparkle(_) | Prop::Poop(_) => None,
     }
 }
 
