@@ -223,6 +223,8 @@ pub fn start(mtm: MainThreadMarker) {
             ((bounds.min_x + bounds.max_x) / 2.0, ground)
         })
         .unwrap_or((0.0, 0.0));
+    let mut cat = Cat::new(start_x);
+    cat.set_pig(settings.coat.is_pig());
     let app = App {
         mtm,
         controller,
@@ -246,7 +248,7 @@ pub fn start(mtm: MainThreadMarker) {
         settings_path,
         coat_menu,
         cat_photo: coat::CatPhotoState::default(),
-        cat: Cat::new(start_x),
+        cat,
         ground,
         rng: Rng::new(seed()),
         last_look: None,

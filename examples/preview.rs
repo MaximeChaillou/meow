@@ -78,6 +78,8 @@ fn main() {
         (Pose::Hack(0), Bubble::None, Facing::Right),
         (Pose::Hack(1), Bubble::None, Facing::Right),
         (Pose::Hack(SPIT), Bubble::None, Facing::Right),
+        (Pose::Squat(0), Bubble::None, Facing::Right),
+        (Pose::Squat(1), Bubble::None, Facing::Right),
     ];
     let props = [
         Prop::Bowl(3),
@@ -90,6 +92,9 @@ fn main() {
         Prop::Hairball(1),
         Prop::Sparkle(0),
         Prop::Sparkle(1),
+        Prop::Poop(3),
+        Prop::Poop(2),
+        Prop::Poop(1),
     ];
     let row_h = CANVAS_H * SCALE;
     let cats_w = CANVAS_W * SCALE * looks.len();

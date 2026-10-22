@@ -6,6 +6,11 @@ const OUTLINE: Rgb = [42, 34, 48];
 const WHITE: Rgb = [255, 246, 233];
 const PINK: Rgb = [244, 166, 183];
 const RED: Rgb = [224, 67, 90];
+// Dédé's own: belly, nostrils, hooves, cheek.
+const BELLY: Rgb = [252, 202, 208];
+const NOSTRIL: Rgb = [120, 50, 70];
+const HOOF: Rgb = [118, 82, 92];
+const CHEEK: Rgb = [240, 140, 150];
 
 /// The cat's fur and eyes. The sprites name body parts, each coat colors them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,6 +22,8 @@ pub enum Coat {
     Willow,
     /// Grey and white bicolour: white blaze, muzzle and paws, odd eyes.
     Alfie,
+    /// Not a cat: a pink pig with mud on his flank, who poops and eats it.
+    Dede,
     /// Colors read from a photo of the user's own cat.
     Custom(Palette),
 }
@@ -69,8 +76,21 @@ const ALFIE: Palette = Palette {
     far_eye: [214, 158, 56],
 };
 
+const DEDE: Palette = Palette {
+    fur: [246, 178, 188],
+    // Mud.
+    stripe: [128, 92, 62],
+    blaze: [246, 178, 188],
+    // The snout and the inside of the ears.
+    muzzle: [226, 124, 146],
+    legs: [246, 178, 188],
+    tail: [218, 112, 138],
+    near_eye: OUTLINE,
+    far_eye: OUTLINE,
+};
+
 impl Coat {
-    pub const ALL: [Coat; 3] = [Coat::Ginger, Coat::Willow, Coat::Alfie];
+    pub const ALL: [Coat; 4] = [Coat::Ginger, Coat::Willow, Coat::Alfie, Coat::Dede];
 
     /// The name of a built-in coat; custom ones are named in the settings.
     pub fn name(self) -> &'static str {
@@ -78,6 +98,7 @@ impl Coat {
             Coat::Ginger => "Ginger",
             Coat::Willow => "Willow",
             Coat::Alfie => "Alfie",
+            Coat::Dede => "Dédé",
             Coat::Custom(_) => "My Cat",
         }
     }
@@ -87,8 +108,14 @@ impl Coat {
             Coat::Ginger => &GINGER,
             Coat::Willow => &WILLOW,
             Coat::Alfie => &ALFIE,
+            Coat::Dede => &DEDE,
             Coat::Custom(palette) => palette,
         }
+    }
+
+    /// Dédé is drawn as a pig, and poops where a cat coughs up hairballs.
+    pub fn is_pig(self) -> bool {
+        self == Coat::Dede
     }
 
     /// The color of a sprite cell; `None` for anything else (transparent).
@@ -99,6 +126,10 @@ impl Coat {
             'w' => Some(WHITE),
             'p' => Some(PINK),
             'r' => Some(RED),
+            'b' => Some(BELLY),
+            'n' => Some(NOSTRIL),
+            'h' => Some(HOOF),
+            'q' => Some(CHEEK),
             'o' => Some(palette.fur),
             's' => Some(palette.stripe),
             'm' => Some(palette.blaze),

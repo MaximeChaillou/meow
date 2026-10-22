@@ -159,6 +159,7 @@ impl App {
     /// Wears and saves `settings`, and shows them in the theme menu.
     fn apply_settings(&mut self, settings: Settings) {
         self.settings = settings;
+        self.cat.set_pig(self.settings.coat.is_pig());
         self.refill_coat_menu();
         self.chat.set_coat(self.settings.coat);
         // Redraw now, even if the cat holds still.

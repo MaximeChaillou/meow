@@ -36,7 +36,7 @@ use your regular Claude subscription, not API billing.
 - **Pet the cat** by stroking it: move the mouse back and forth over it (no
   click). It closes its eyes and little hearts float up.
 - **Dress the cat like yours**: right-click the cat › **Theme** picks its coat
-  (Ginger, Willow, Alfie). **Add from Cat Photo…** asks for a photo of your
+  (Ginger, Willow, Alfie, or Dédé, who is a pig). **Add from Cat Photo…** asks for a photo of your
   cat; Claude (Haiku, allowed only to read a shrunk copy of the photo) picks
   the color of its fur, stripes, blaze, muzzle, legs, tail and each eye, and
   names the theme (after the file's name when that looks like the cat's). The
@@ -47,6 +47,9 @@ use your regular Claude subscription, not API billing.
 - **Now and then the cat coughs up a hairball** (or on demand: **Hairball** in
   its menu). It stays on the floor until you clean it: scrub it with the mouse
   button down, or click it a few times, until it sparkles and is gone.
+- **Dédé the pig poops instead** (the item is called **Poop** then): he
+  squats, drops it behind him, turns around to admire it, hearts floating up,
+  and eats it. Wipe it before he does and he goes off disappointed.
 
 Requests use **Haiku** (latest version) by default, the cheapest Claude model,
 which is plenty for fetching from connectors and summarizing; sub-agents use it

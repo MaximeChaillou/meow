@@ -1,10 +1,12 @@
 //! Pixel-art cat, drawn as text grids and composed into RGB frames.
 //!
-//! The cat is drawn facing right; left-facing frames are mirrored.
+//! The cat is drawn facing right; left-facing frames are mirrored. One coat,
+//! Dédé, is a pig: same outline and poses, its own head, body and tail.
 
 mod coat;
 mod hairball;
 mod hanging;
+mod pig;
 mod play;
 
 pub use coat::{Coat, Palette};
@@ -82,6 +84,8 @@ pub enum Pose {
     /// Hunched over, coughing up a hairball: 0 catches its breath, 1 heaves,
     /// `SPIT` brings it up.
     Hack(u8),
+    /// Rump lowered, tail up, pooping: 0 settles, 1 pushes, `SPIT` lets go.
+    Squat(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,13 +186,21 @@ const BANG: [&str; 4] = ["kwwwkwwwk", "kwwwkwwwk", "kwwwwwwwk", "kwwwkwwwk"];
 /// A mutable char grid used while composing a frame.
 struct Grid {
     cells: Vec<char>,
+    /// Draw the pig rather than the cat.
+    pig: bool,
 }
 
 impl Grid {
-    fn new() -> Self {
+    fn new(pig: bool) -> Self {
         Self {
             cells: vec!['.'; CANVAS_W * CANVAS_H],
+            pig,
         }
+    }
+
+    /// An empty grid for the same animal, to compose a pose in.
+    fn blank(&self) -> Self {
+        Self::new(self.pig)
     }
 
     fn set(&mut self, x: isize, y: usize, c: char) {
@@ -224,7 +236,10 @@ impl Grid {
     }
 }
 
-fn cat_rows(eyes_closed: bool) -> Vec<&'static str> {
+fn cat_rows(pig: bool, eyes_closed: bool) -> Vec<&'static str> {
+    if pig {
+        return pig::rows(eyes_closed);
+    }
     let eyes = if eyes_closed { EYES_CLOSED } else { EYES_OPEN };
     HEAD_TOP
         .iter()
@@ -269,14 +284,17 @@ fn draw_legs(grid: &mut Grid, top: usize, strides: [isize; 4], extra: usize) {
 }
 
 fn draw_standing(grid: &mut Grid, eyes_closed: bool, strides: [isize; 4]) {
-    grid.blit(&cat_rows(eyes_closed), 0, BUBBLE_H);
+    if grid.pig {
+        return pig::draw_standing(grid, eyes_closed, strides);
+    }
+    grid.blit(&cat_rows(grid.pig, eyes_closed), 0, BUBBLE_H);
     draw_legs(grid, BUBBLE_H, strides, 0);
 }
 
 /// The standing cat turned a quarter turn: head up, paws reaching the right
 /// edge of the canvas (the wall), tail hanging below.
 fn draw_clinging(grid: &mut Grid, strides: [isize; 4]) {
-    let mut standing = Grid::new();
+    let mut standing = grid.blank();
     draw_standing(&mut standing, false, strides);
     for y in BUBBLE_H..CANVAS_H {
         for x in 0..CANVAS_W {
@@ -297,7 +315,7 @@ fn draw_clinging(grid: &mut Grid, strides: [isize; 4]) {
 /// The standing cat flipped over: paws on the top edge of the canvas (the
 /// top of the screen), tail hanging down.
 fn draw_upside_down(grid: &mut Grid, strides: [isize; 4]) {
-    let mut standing = Grid::new();
+    let mut standing = grid.blank();
     draw_standing(&mut standing, false, strides);
     for y in BUBBLE_H..CANVAS_H {
         for x in 0..CANVAS_W {
@@ -311,15 +329,21 @@ fn draw_upside_down(grid: &mut Grid, strides: [isize; 4]) {
 
 fn draw_sleeping(grid: &mut Grid) {
     let top = SLEEP_TOP;
-    grid.blit(&cat_rows(true), 0, top);
-    // Tuck the tail away: clear it and close the back outline.
+    grid.blit(&cat_rows(grid.pig, true), 0, top);
+    if !grid.pig {
+        tuck_tail(grid, top);
+    }
+    draw_belly(grid, top + HEAD_TOP.len() + 2 + BODY.len());
+}
+
+/// Tucks the sleeping cat's tail away: clears it and closes the back outline.
+fn tuck_tail(grid: &mut Grid, top: usize) {
     for y in top + 1..top + 6 {
         for x in 0..4 {
             grid.set(x, y, '.');
         }
     }
     grid.set(3, top + 6, 'k');
-    draw_belly(grid, top + HEAD_TOP.len() + 2 + BODY.len());
 }
 
 /// Hearts rise through the space above the cat in three staggered lanes,
@@ -362,7 +386,7 @@ fn draw_bubble(grid: &mut Grid, bubble: Bubble) {
 }
 
 pub fn render(look: &Look, coat: Coat) -> Frame {
-    let mut grid = Grid::new();
+    let mut grid = Grid::new(coat.is_pig());
     match look.pose {
         Pose::Walk(phase) => draw_standing(&mut grid, false, WALK_STRIDES[phase as usize % 4]),
         Pose::Stand => draw_standing(&mut grid, false, [0; 4]),
@@ -375,6 +399,7 @@ pub fn render(look: &Look, coat: Coat) -> Frame {
         Pose::Eat(bite) => play::draw_eating(&mut grid, bite),
         Pose::Swat(phase) => play::draw_swatting(&mut grid, phase),
         Pose::Hack(phase) => hairball::draw_hacking(&mut grid, phase),
+        Pose::Squat(phase) => pig::draw_squatting(&mut grid, phase),
     }
     draw_bubble(&mut grid, look.bubble);
 
@@ -611,7 +636,8 @@ mod tests {
     #[test]
     fn coats_color_the_cat_differently() {
         let stand = look(Pose::Stand, Bubble::None, Facing::Right);
-        let frames = Coat::ALL.map(|coat| super::render(&stand, coat));
+        let cats = Coat::ALL.into_iter().filter(|coat| !coat.is_pig());
+        let frames: Vec<_> = cats.map(|coat| super::render(&stand, coat)).collect();
         assert_ne!(frames[0], frames[1]);
         assert_ne!(frames[1], frames[2]);
         assert_ne!(frames[0], frames[2]);
@@ -655,7 +681,7 @@ mod tests {
 
     #[test]
     fn closed_eyes_are_outlined_whatever_the_coat() {
-        for coat in Coat::ALL {
+        for coat in Coat::ALL.into_iter().filter(|coat| !coat.is_pig()) {
             let eyes = eye_colors(coat, Pose::Blink);
             assert!(eyes.iter().all(|&eye| Some(eye) == color('k')), "{coat:?}");
         }

@@ -2,7 +2,7 @@
 //! cat in their own window (the kibble bowl, the mouse it chases, a hairball).
 
 use super::{
-    BUBBLE_H, CANVAS_H, CANVAS_W, Coat, Facing, Frame, Grid, HEAD_TOP, LEG_ROW, Rgb, hairball,
+    BUBBLE_H, CANVAS_H, CANVAS_W, Coat, Facing, Frame, Grid, HEAD_TOP, LEG_ROW, Rgb, hairball, pig,
 };
 
 pub const PROP_W: usize = 11;
@@ -43,14 +43,21 @@ pub enum Prop {
     Hairball(u8),
     /// Glints where a hairball was wiped clean; the frame twinkles them.
     Sparkle(u8),
+    /// Dédé's poop with this much left, 1 (a smear) to 3 (all of it).
+    Poop(u8),
 }
 
 /// The cat with its head lowered into a bowl in front of it, eyes shut.
 pub(super) fn draw_eating(grid: &mut Grid, bite: u8) {
-    let mut standing = Grid::new();
+    let mut standing = grid.blank();
     super::draw_standing(&mut standing, true, [0; 4]);
     let drop = BITE_DROPS[bite as usize % BITE_DROPS.len()];
-    let is_head = |x: usize, y: usize| x >= HEAD_X && (BUBBLE_H..BUBBLE_H + HEAD_ROWS).contains(&y);
+    let (head_x, head_rows) = if grid.pig {
+        (pig::HEAD_X, pig::HEAD_ROWS)
+    } else {
+        (HEAD_X, HEAD_ROWS)
+    };
+    let is_head = |x: usize, y: usize| x >= head_x && (BUBBLE_H..BUBBLE_H + head_rows).contains(&y);
     let cells = |grid: &Grid| {
         (0..CANVAS_H)
             .flat_map(|y| (0..CANVAS_W).map(move |x| (x, y)))
@@ -72,15 +79,20 @@ pub(super) fn draw_eating(grid: &mut Grid, bite: u8) {
 /// or struck forward and down.
 pub(super) fn draw_swatting(grid: &mut Grid, phase: u8) {
     super::draw_standing(grid, false, [0; 4]);
+    let leg_x = if grid.pig {
+        pig::SWAT_LEG_X
+    } else {
+        SWAT_LEG_X
+    };
     let belly = BUBBLE_H + LEG_ROW;
     // Take the front leg off the ground; its near outline is shared with the other leg.
     for y in belly + 1..=belly + 3 {
-        for x in SWAT_LEG_X + 1..=SWAT_LEG_X + 3 {
+        for x in leg_x + 1..=leg_x + 3 {
             grid.set(x, y, '.');
         }
     }
-    grid.set(SWAT_LEG_X + 1, belly, 'k');
-    grid.set(SWAT_LEG_X + 2, belly, 'k');
+    grid.set(leg_x + 1, belly, 'k');
+    grid.set(leg_x + 2, belly, 'k');
     // Raised in front of the chin, then slapped down to the ground.
     let (top, len) = if phase.is_multiple_of(2) {
         (belly - 5, 4)
@@ -119,6 +131,7 @@ fn prop_rows(prop: Prop) -> Vec<&'static str> {
         }
         Prop::Hairball(dirt) => hairball::hairball_rows(dirt).to_vec(),
         Prop::Sparkle(frame) => hairball::sparkle_rows(frame).to_vec(),
+        Prop::Poop(left) => pig::poop_rows(left).to_vec(),
     }
 }
 
@@ -129,7 +142,9 @@ fn prop_color(c: char) -> Option<Rgb> {
         'n' => Some([176, 112, 56]),
         'd' => Some([122, 72, 36]),
         // Outline and pink as on the cat; props never wear its coat.
-        other => hairball::color(other).or_else(|| Coat::Ginger.color(other)),
+        other => hairball::color(other)
+            .or_else(|| pig::color(other))
+            .or_else(|| Coat::Ginger.color(other)),
     }
 }
 
@@ -227,6 +242,9 @@ mod tests {
             Prop::Hairball(3),
             Prop::Hairball(2),
             Prop::Hairball(1),
+            Prop::Poop(3),
+            Prop::Poop(2),
+            Prop::Poop(1),
         ] {
             let frame = render_prop(prop, Facing::Right);
             assert_eq!(lowest_row(&frame, 0..PROP_W), Some(PROP_H - 1), "{prop:?}");
