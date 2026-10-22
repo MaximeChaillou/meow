@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::sprites::{Frame, Rgb};
 
-/// Icons are square, this many pixels a side.
+/// Icons are square, at most this many pixels a side.
 pub const ICON_PIXELS: usize = 10;
 /// Up to this many distinct sources get an icon each; more are grouped.
 pub const MAX_SEPARATE_ICONS: usize = 3;
@@ -72,17 +72,17 @@ impl Source {
         }
     }
 
-    fn art(self) -> [&'static str; ICON_PIXELS] {
+    fn art(self) -> &'static [&'static str] {
         match self {
-            Self::Slack => SLACK,
-            Self::Calendar => CALENDAR,
-            Self::GitHub => GITHUB,
-            Self::Linear => LINEAR,
-            Self::Mail => MAIL,
-            Self::Notion => NOTION,
-            Self::Scheduled => CLOCK,
-            Self::Me => PERSON,
-            Self::Other => OTHER,
+            Self::Slack => &SLACK,
+            Self::Calendar => &CALENDAR,
+            Self::GitHub => &GITHUB,
+            Self::Linear => &LINEAR,
+            Self::Mail => &MAIL,
+            Self::Notion => &NOTION,
+            Self::Scheduled => &CLOCK,
+            Self::Me => &PERSON,
+            Self::Other => &OTHER,
         }
     }
 }
@@ -146,13 +146,19 @@ const BUBBLE_PAD: usize = 1;
 const TAIL_ROWS: usize = 2;
 
 /// `icons` in a dark bubble with a light outline, its tail on the left (for
-/// a cat facing right) or the right.
+/// a cat facing right) or the right. The bubble fits the icons: smaller ones
+/// make it smaller, and sit centered on the tallest.
 pub fn news_bubble(icons: &Icons, tail_left: bool) -> NewsBubble {
     let frames = icons.frames();
-    let count = frames.len().max(1);
-    let inner_w = count * ICON_PIXELS + (count - 1) * BUBBLE_PAD;
+    let inner_w = frames.iter().map(|icon| icon.width).sum::<usize>()
+        + frames.len().saturating_sub(1) * BUBBLE_PAD;
+    let inner_h = frames
+        .iter()
+        .map(|icon| icon.height)
+        .max()
+        .unwrap_or(ICON_PIXELS);
     let width = inner_w + 2 * (1 + BUBBLE_PAD);
-    let body_h = ICON_PIXELS + 2 * (1 + BUBBLE_PAD);
+    let body_h = inner_h + 2 * (1 + BUBBLE_PAD);
     let height = body_h + TAIL_ROWS;
     let mut pixels = vec![None; width * height];
     let mut set = |x: usize, y: usize, rgb: Option<Rgb>| pixels[y * width + x] = rgb;
@@ -176,15 +182,17 @@ pub fn news_bubble(icons: &Icons, tail_left: bool) -> NewsBubble {
     set(tip_x, body_h, Some(WHITE));
     set(next, body_h, Some(WHITE));
     set(tip_x, body_h + 1, Some(WHITE));
-    for (i, icon) in frames.iter().enumerate() {
-        let left = 1 + BUBBLE_PAD + i * (ICON_PIXELS + BUBBLE_PAD);
-        for y in 0..ICON_PIXELS {
-            for x in 0..ICON_PIXELS {
+    let mut left = 1 + BUBBLE_PAD;
+    for icon in &frames {
+        let top = 1 + BUBBLE_PAD + (inner_h - icon.height) / 2;
+        for y in 0..icon.height {
+            for x in 0..icon.width {
                 if let Some(rgb) = icon.get(x, y) {
-                    set(left + x, 1 + BUBBLE_PAD + y, Some(rgb));
+                    set(left + x, top + y, Some(rgb));
                 }
             }
         }
+        left += icon.width + BUBBLE_PAD;
     }
     NewsBubble {
         frame: Frame {
@@ -198,14 +206,11 @@ pub fn news_bubble(icons: &Icons, tail_left: bool) -> NewsBubble {
 
 /// The icon of one source.
 pub fn icon(source: Source) -> Frame {
-    let pixels = source
-        .art()
-        .iter()
-        .flat_map(|row| row.chars().map(color))
-        .collect();
+    let art = source.art();
+    let pixels = art.iter().flat_map(|row| row.chars().map(color)).collect();
     Frame {
-        width: ICON_PIXELS,
-        height: ICON_PIXELS,
+        width: art.len(),
+        height: art.len(),
         pixels,
     }
 }
@@ -250,6 +255,12 @@ const CYAN: Rgb = [0x73, 0xef, 0xf7];
 const GREY: Rgb = [0x94, 0xb0, 0xc2];
 const SLATE: Rgb = [0x56, 0x6c, 0x86];
 
+// Slack's own colors, outside the palette: its logo is known by them.
+const SLACK_BLUE: Rgb = [0x36, 0xc5, 0xf0];
+const SLACK_GREEN: Rgb = [0x2e, 0xb6, 0x7d];
+const SLACK_YELLOW: Rgb = [0xec, 0xb2, 0x2e];
+const SLACK_RED: Rgb = [0xe0, 0x1e, 0x5a];
+
 fn color(cell: char) -> Option<Rgb> {
     match cell {
         'k' => Some(INK),
@@ -262,22 +273,28 @@ fn color(cell: char) -> Option<Rgb> {
         'c' => Some(CYAN),
         's' => Some(GREY),
         'd' => Some(SLATE),
+        'B' => Some(SLACK_BLUE),
+        'G' => Some(SLACK_GREEN),
+        'Y' => Some(SLACK_YELLOW),
+        'R' => Some(SLACK_RED),
         _ => None,
     }
 }
 
 // Art cells: see `color`; `.` is transparent.
-const SLACK: [&str; ICON_PIXELS] = [
-    "..c...l...",
-    "..c...l...",
-    "rrcrrrlrrr",
-    "..c...l...",
-    "..c...l...",
-    "..c...l...",
-    "..c...l...",
-    "yycyyylyyy",
-    "..c...l...",
-    "..c...l...",
+/// The pinwheel: four bars, each with a dot beside its outer end, around an
+/// empty cross. A one-pixel cross needs an odd size, so it is nine pixels a
+/// side; to fit the gap between each bar and its dot, the dots are one thick.
+const SLACK: [&str; ICON_PIXELS - 1] = [
+    "..BB.GG..",
+    ".....GG..",
+    "BBBB.GG.G",
+    "BBBB.GG.G",
+    ".........",
+    "R.RR.YYYY",
+    "R.RR.YYYY",
+    "..RR.....",
+    "..RR.YY..",
 ];
 const CALENDAR: [&str; ICON_PIXELS] = [
     "..s....s..",
@@ -423,9 +440,11 @@ mod tests {
     #[test]
     fn every_icon_is_square_and_fully_drawn() {
         for source in ALL {
-            assert!(source.art().iter().all(|row| row.len() == ICON_PIXELS));
+            let art = source.art();
+            assert!(art.len() <= ICON_PIXELS, "{source:?} is too big");
+            assert!(art.iter().all(|row| row.len() == art.len()));
             let frame = icon(source);
-            assert_eq!(frame.pixels.len(), ICON_PIXELS * ICON_PIXELS);
+            assert_eq!(frame.pixels.len(), frame.width * frame.height);
             assert!(
                 frame.pixels.iter().filter(|p| p.is_some()).count() > 20,
                 "{source:?} has too few pixels"
@@ -455,8 +474,8 @@ mod tests {
 
     #[test]
     fn the_news_bubble_grows_with_its_icons_and_points_down_at_the_cat() {
-        let one = news_bubble(&Icons::for_sources(&[Source::Slack]), true);
-        let three = Icons::for_sources(&[Source::Slack, Source::GitHub, Source::Linear]);
+        let one = news_bubble(&Icons::for_sources(&[Source::GitHub]), true);
+        let three = Icons::for_sources(&[Source::GitHub, Source::Linear, Source::Mail]);
         let three = news_bubble(&three, false);
         assert_eq!((one.frame.width, one.frame.height), (14, 16));
         assert_eq!(three.frame.width, 3 * ICON_PIXELS + 2 + 4);
@@ -475,8 +494,18 @@ mod tests {
         // The first icon's top-left pixel sits inside the padding.
         assert_eq!(
             one.frame.get(2, 2),
-            icon(Source::Slack).get(0, 0).or(Some(INK))
+            icon(Source::GitHub).get(0, 0).or(Some(INK))
         );
+    }
+
+    #[test]
+    fn a_smaller_icon_makes_a_smaller_bubble() {
+        assert_eq!(icon(Source::Slack).width, ICON_PIXELS - 1);
+        let alone = news_bubble(&Icons::for_sources(&[Source::Slack]), true);
+        assert_eq!((alone.frame.width, alone.frame.height), (13, 15));
+        let mixed = news_bubble(&Icons::for_sources(&[Source::Slack, Source::GitHub]), true);
+        assert_eq!(mixed.frame.width, (ICON_PIXELS - 1) + ICON_PIXELS + 1 + 4);
+        assert_eq!(mixed.frame.height, 16, "as tall as the taller icon");
     }
 
     #[test]
