@@ -76,6 +76,12 @@ struct App {
     /// The cat's bowl, or the mouse it chases.
     prop_window: CatWindow,
     last_prop: Option<PropView>,
+    /// The hairball the cat left on the floor, until it is wiped away.
+    hairball_window: CatWindow,
+    last_hairball: Option<PropView>,
+    /// The screen height of the ground the hairball lies on: it stays there
+    /// when the cat moves to another screen.
+    hairball_ground: f64,
     /// Where unread news comes from, above the cat's head in place of its `!`.
     news_bubble: NewsBubbleWindow,
     /// The icons and side the bubble last showed them on.
@@ -224,6 +230,9 @@ pub fn start(mtm: MainThreadMarker) {
         cat_overflow: CatWindow::overflow(mtm),
         prop_window,
         last_prop: None,
+        hairball_window: CatWindow::hairball(mtm),
+        last_hairball: None,
+        hairball_ground: ground,
         news_bubble: NewsBubbleWindow::new(mtm),
         last_news: None,
         held_pointer: None,
@@ -425,6 +434,7 @@ impl App {
         self.cat.update(dt, bounds, inputs, &mut self.rng);
         self.show_cat(frame, NSPoint::new(self.cat.x, ground + self.cat.y));
         self.show_prop(ground);
+        self.show_hairball(ground);
         self.hold_pointer(ground);
 
         let look = self.cat.look(inputs);
@@ -495,6 +505,34 @@ impl App {
         self.last_prop = prop;
     }
 
+    /// Shows the hairball where it landed, on the ground of the screen the cat
+    /// was on then.
+    fn show_hairball(&mut self, ground: f64) {
+        let hairball = self.cat.hairball();
+        if hairball == self.last_hairball {
+            return;
+        }
+        match hairball {
+            Some(view) => {
+                if self.last_hairball.is_none() {
+                    self.hairball_ground = ground;
+                }
+                self.hairball_window
+                    .move_to(view.x as f64, self.hairball_ground);
+                self.hairball_window
+                    .view
+                    .show(render_prop(view.prop, view.facing));
+                if self.last_hairball.is_none() {
+                    self.hairball_window.panel.orderFrontRegardless();
+                    // The cat walks in front of it.
+                    self.cat_window.panel.orderFrontRegardless();
+                }
+            }
+            None => self.hairball_window.panel.orderOut(None),
+        }
+        self.last_hairball = hairball;
+    }
+
     /// Feeds the cat, or lets a mouse in, from its menu.
     fn play(&mut self, event: UiEvent) {
         let Some((bounds, ..)) = self.cat_screen() else {
@@ -517,6 +555,11 @@ impl App {
             UiEvent::AddCoatFromPhoto => self.add_coat_from_photo(),
             UiEvent::RemoveCoat => self.remove_coat(),
             UiEvent::Feed | UiEvent::ReleaseMouse => self.play(event),
+            UiEvent::CoughUp => {
+                self.cat.cough_up();
+            }
+            UiEvent::WipeHairball(distance) => self.cat.wipe_hairball(distance),
+            UiEvent::TapHairball => self.cat.tap_hairball(),
             UiEvent::QuickAction(index) => self.quick_action(index),
             UiEvent::RunAction => self.rerun_shown_action(),
             UiEvent::ShowChat => self.show_conversation(ChatId::Main),

@@ -29,6 +29,12 @@ pub enum UiEvent {
     Feed,
     /// Let a mouse run across the screen for the cat to chase.
     ReleaseMouse,
+    /// Have the cat cough up a hairball.
+    CoughUp,
+    /// The hairball was scrubbed with the mouse button down, this far (points).
+    WipeHairball(f64),
+    /// The hairball was clicked.
+    TapHairball,
     /// Index into the loaded quick actions.
     QuickAction(usize),
     /// Run the quick action shown on the chat page again.

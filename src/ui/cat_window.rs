@@ -41,6 +41,8 @@ pub struct CatViewIvars {
     /// How far (points, screen directions) the sprite is drawn from the
     /// window's corner: off it when only part of the cat is on this screen.
     shift: Cell<(f64, f64)>,
+    /// Shows a hairball: dragging over it scrubs it, clicking dabs at it.
+    wipes: Cell<bool>,
 }
 
 define_class!(
@@ -76,6 +78,13 @@ define_class!(
             let Some(mut press) = self.ivars().press.get() else { return };
             let mouse = NSEvent::mouseLocation();
             let (dx, dy) = (mouse.x - press.mouse.x, mouse.y - press.mouse.y);
+            if self.ivars().wipes.get() {
+                push(UiEvent::WipeHairball(dx.hypot(dy)));
+                press.mouse = mouse;
+                press.dragging = true;
+                self.ivars().press.set(Some(press));
+                return;
+            }
             if !press.dragging && dx.hypot(dy) >= DRAG_THRESHOLD {
                 press.dragging = true;
                 // Hang the cat by its scruff right under the cursor.
@@ -98,6 +107,9 @@ define_class!(
         /// Moving the mouse over the cat, without a button, strokes it.
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, _event: &NSEvent) {
+            if self.ivars().wipes.get() {
+                return;
+            }
             let mouse = NSEvent::mouseLocation();
             if let Some(last) = self.ivars().hover.replace(Some(mouse)) {
                 let distance = (mouse.x - last.x).hypot(mouse.y - last.y);
@@ -112,7 +124,14 @@ define_class!(
 
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, _event: &NSEvent) {
-            match self.ivars().press.take() {
+            let press = self.ivars().press.take();
+            if self.ivars().wipes.get() {
+                if press.is_some_and(|press| !press.dragging) {
+                    push(UiEvent::TapHairball);
+                }
+                return;
+            }
+            match press {
                 Some(Press { dragging: true, .. }) => {
                     NSCursor::arrowCursor().set();
                     push(UiEvent::Drop);
@@ -206,6 +225,15 @@ impl CatWindow {
         let size = NSSize::new(PROP_W as f64 * SCALE, PROP_H as f64 * SCALE);
         let window = Self::panel(mtm, size);
         window.panel.setIgnoresMouseEvents(true);
+        window
+    }
+
+    /// A window for the hairball on the floor: it takes clicks and drags, to
+    /// wipe it away, and starts hidden.
+    pub fn hairball(mtm: MainThreadMarker) -> Self {
+        let size = NSSize::new(PROP_W as f64 * SCALE, PROP_H as f64 * SCALE);
+        let window = Self::panel(mtm, size);
+        window.view.ivars().wipes.set(true);
         window
     }
 

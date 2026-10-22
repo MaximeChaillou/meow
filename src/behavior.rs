@@ -2,12 +2,15 @@
 //!
 //! Pure logic, independent of AppKit, driven by `update` once per tick.
 
+mod hairball;
 mod play;
 mod shake;
 
+pub use hairball::HAIRBALL_CHANCE;
 pub use play::{CAT_WIDTH, PROP_WIDTH, Prey, PropView};
 
 use crate::sprites::{Bubble, Facing, Kick, Look, Pose};
+use hairball::Hairball;
 use shake::Shake;
 
 pub const WALK_SPEED: f64 = 28.0;
@@ -86,6 +89,8 @@ pub enum Activity {
     Chasing,
     /// After the mouse pointer, which was shaken nearby.
     Hunting,
+    /// Hunched over, coughing up a hairball.
+    Hacking,
 }
 
 /// Where the cat may go: `x` is the window's left edge, `y` its height above the ground.
@@ -225,6 +230,10 @@ pub struct Cat {
     caught_for: f64,
     /// Seconds left ignoring pointer shakes, after a catch.
     catch_cooldown: f64,
+    /// Seconds of hacking left before the hairball comes up.
+    hack_left: f64,
+    /// Left on the floor until the user wipes it away.
+    hairball: Option<Hairball>,
     activity: Activity,
     time_left: f64,
     clock: f64,
@@ -261,6 +270,8 @@ impl Cat {
             holding_for: 0.0,
             caught_for: 0.0,
             catch_cooldown: 0.0,
+            hack_left: 0.0,
+            hairball: None,
             activity: Activity::Walking,
             time_left: 6.0,
             clock: 0.0,
@@ -341,6 +352,7 @@ impl Cat {
         self.affection = (self.affection - AFFECTION_DECAY * dt).max(0.0);
         self.petted_left = (self.petted_left - dt).max(0.0);
         self.run_prey(dt, bounds);
+        self.age_hairball(dt);
         self.catch_cooldown = (self.catch_cooldown - dt).max(0.0);
         if self.activity == Activity::Held {
             // Picked up: the pointer goes free.
@@ -358,7 +370,8 @@ impl Cat {
             | Activity::Sleeping
             | Activity::Eating
             | Activity::Chasing
-            | Activity::Hunting => {}
+            | Activity::Hunting
+            | Activity::Hacking => {}
         }
         self.x = self.x.clamp(bounds.min_x, bounds.max_x);
         self.y = 0.0;
@@ -384,6 +397,7 @@ impl Cat {
             Activity::Eating => return self.eat(dt),
             Activity::Chasing => return self.chase(dt, bounds, rng),
             Activity::Hunting => return self.hunt(dt, bounds, rng),
+            Activity::Hacking => return self.hack(dt, bounds),
             Activity::Walking => self.walk(dt, bounds.min_x, bounds.max_x),
             _ => {}
         }
@@ -489,6 +503,8 @@ impl Cat {
                 self.feed(bounds)
             } else if roll >= 1.0 - SNACK_CHANCE - MOUSE_CHANCE {
                 self.release_mouse(bounds, rng)
+            } else if roll >= 1.0 - SNACK_CHANCE - MOUSE_CHANCE - HAIRBALL_CHANCE {
+                self.cough_up()
             } else {
                 false
             };
@@ -507,7 +523,8 @@ impl Cat {
             | Activity::Clinging
             | Activity::Eating
             | Activity::Chasing
-            | Activity::Hunting => (Activity::Walking, 4.0, 10.0),
+            | Activity::Hunting
+            | Activity::Hacking => (Activity::Walking, 4.0, 10.0),
         };
         if activity == Activity::Walking {
             self.facing = if rng.next_f64() < 0.5 {
@@ -626,6 +643,7 @@ impl Cat {
             Activity::Eating | Activity::Chasing | Activity::Hunting => {
                 self.play_pose().unwrap_or(Pose::Stand)
             }
+            Activity::Hacking => self.hack_pose(),
             Activity::Walking => Pose::Walk((self.clock * WALK_FPS) as u64 as u8 % 4),
             Activity::Sleeping => Pose::Sleep,
             Activity::Held => self.dangle_pose(),
@@ -656,6 +674,8 @@ impl Cat {
     }
 }
 
+#[cfg(test)]
+mod hairball_tests;
 #[cfg(test)]
 mod play_tests;
 #[cfg(test)]

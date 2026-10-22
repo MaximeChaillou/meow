@@ -1,0 +1,138 @@
+//! Now and then the cat coughs up a hairball, which stays on the floor until
+//! the user wipes it away.
+
+use crate::sprites::{Facing, MOUTH, Pose, Prop, SCALE, SPIT};
+
+use super::play::{CAT_WIDTH, PROP_WIDTH};
+use super::{Activity, Bounds, Cat};
+
+/// Chance, when an idle cat picks what to do next, of coughing up a hairball.
+pub const HAIRBALL_CHANCE: f64 = 0.02;
+pub const HACK_SECONDS: f64 = 2.4;
+/// The end of the hack, head down to the floor, bringing it up.
+pub const SPIT_SECONDS: f64 = 0.4;
+const HEAVE_FPS: f64 = 4.0;
+/// The hairball lands this far past the front of the jaw.
+const SPIT_REACH: f64 = 2.0 * SCALE;
+/// Scrubbing (points of mouse travel) that wipes the hairball away.
+pub const WIPE_DISTANCE: f64 = 300.0;
+/// What one click on the hairball wipes.
+pub const WIPE_PER_TAP: f64 = WIPE_DISTANCE / 4.0;
+const DIRT_LEVELS: f64 = 3.0;
+/// The spot glints this long once wiped clean.
+pub const SPARKLE_SECONDS: f64 = 0.8;
+const SPARKLE_FPS: f64 = 6.0;
+
+/// A hairball on the floor, where the cat left it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Hairball {
+    /// Left edge of its window.
+    x: f64,
+    facing: Facing,
+    /// Points of scrubbing so far.
+    wiped: f64,
+    /// Seconds since it was wiped clean, while the spot glints.
+    clean_for: Option<f64>,
+}
+
+impl Cat {
+    /// Starts coughing up a hairball, unless one is already on the floor or
+    /// the cat is busy with something else. Returns whether it started.
+    pub fn cough_up(&mut self) -> bool {
+        let free = matches!(
+            self.activity,
+            Activity::Walking | Activity::Idle | Activity::Sleeping
+        );
+        if !free || self.hairball.is_some() || self.has_prop() {
+            return false;
+        }
+        self.activity = Activity::Hacking;
+        self.hack_left = HACK_SECONDS;
+        true
+    }
+
+    /// One tick of hacking; at the end the hairball lands in front of the cat.
+    pub(super) fn hack(&mut self, dt: f64, bounds: Bounds) {
+        self.hack_left -= dt;
+        if self.hack_left > 0.0 {
+            return;
+        }
+        self.hack_left = 0.0;
+        self.hairball = Some(Hairball {
+            x: self.spit_spot(bounds),
+            facing: self.facing,
+            wiped: 0.0,
+            clean_for: None,
+        });
+        self.activity = Activity::Idle;
+        self.time_left = 2.0;
+    }
+
+    /// Left edge of the hairball's window: just past the jaw, on the screen.
+    fn spit_spot(&self, bounds: Bounds) -> f64 {
+        let (mouth_x, _) = self.anchor(MOUTH);
+        let x = match self.facing {
+            Facing::Right => mouth_x - SPIT_REACH,
+            Facing::Left => mouth_x + SPIT_REACH - PROP_WIDTH,
+        };
+        x.clamp(bounds.min_x, bounds.max_x + CAT_WIDTH - PROP_WIDTH)
+    }
+
+    pub(super) fn hack_pose(&self) -> Pose {
+        if self.hack_left <= SPIT_SECONDS {
+            return Pose::Hack(SPIT);
+        }
+        let heaves = (HACK_SECONDS - self.hack_left) * HEAVE_FPS;
+        Pose::Hack(heaves as u64 as u8 % 2)
+    }
+
+    /// The spot glints for a moment once wiped clean, then is gone.
+    pub(super) fn age_hairball(&mut self, dt: f64) {
+        let Some(hairball) = &mut self.hairball else {
+            return;
+        };
+        let Some(clean_for) = &mut hairball.clean_for else {
+            return;
+        };
+        *clean_for += dt;
+        if *clean_for >= SPARKLE_SECONDS {
+            self.hairball = None;
+        }
+    }
+
+    /// The user scrubbed `distance` points over the hairball.
+    pub fn wipe_hairball(&mut self, distance: f64) {
+        let Some(hairball) = &mut self.hairball else {
+            return;
+        };
+        if hairball.clean_for.is_some() {
+            return;
+        }
+        hairball.wiped += distance.abs();
+        if hairball.wiped >= WIPE_DISTANCE {
+            hairball.clean_for = Some(0.0);
+        }
+    }
+
+    /// The user clicked the hairball.
+    pub fn tap_hairball(&mut self) {
+        self.wipe_hairball(WIPE_PER_TAP);
+    }
+
+    /// The hairball on the floor, or the glint where it was.
+    pub fn hairball(&self) -> Option<super::PropView> {
+        let hairball = self.hairball?;
+        let prop = match hairball.clean_for {
+            Some(clean_for) => Prop::Sparkle((clean_for * SPARKLE_FPS) as u64 as u8),
+            None => {
+                let left = 1.0 - hairball.wiped / WIPE_DISTANCE;
+                Prop::Hairball((left * DIRT_LEVELS).ceil().clamp(1.0, DIRT_LEVELS) as u8)
+            }
+        };
+        Some(super::PropView {
+            prop,
+            x: hairball.x.round() as i64,
+            facing: hairball.facing,
+        })
+    }
+}

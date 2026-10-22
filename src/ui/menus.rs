@@ -188,6 +188,7 @@ pub fn cat_menu(
     items.extend([
         item(mtm, "Feed", sel!(feed:), "", Some(target)),
         item(mtm, "Let a Mouse In", sel!(releaseMouse:), "", Some(target)),
+        item(mtm, "Hairball", sel!(coughUp:), "", Some(target)),
     ]);
     let coats = menu(mtm, "Theme", &[]);
     fill_coat_menu(mtm, &coats, target, settings, false);

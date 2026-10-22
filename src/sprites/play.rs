@@ -1,14 +1,16 @@
 //! Playtime: the eating and swatting poses, and the props drawn beside the
-//! cat in their own window (the kibble bowl, the mouse it chases).
+//! cat in their own window (the kibble bowl, the mouse it chases, a hairball).
 
-use super::{BUBBLE_H, CANVAS_H, CANVAS_W, Coat, Facing, Frame, Grid, HEAD_TOP, LEG_ROW, Rgb};
+use super::{
+    BUBBLE_H, CANVAS_H, CANVAS_W, Coat, Facing, Frame, Grid, HEAD_TOP, LEG_ROW, Rgb, hairball,
+};
 
 pub const PROP_W: usize = 11;
 pub const PROP_H: usize = 6;
 
 /// Where the head starts, and how many rows it spans, in the standing cat.
-const HEAD_X: usize = 13;
-const HEAD_ROWS: usize = HEAD_TOP.len() + 2;
+pub(super) const HEAD_X: usize = 13;
+pub(super) const HEAD_ROWS: usize = HEAD_TOP.len() + 2;
 /// Rows the head dips into the bowl, between bites.
 const BITE_DROPS: [usize; 2] = [3, 4];
 /// Outline column on the near side of the front leg that lifts to swat.
@@ -37,6 +39,10 @@ pub enum Prop {
     Bowl(u8),
     /// A little mouse running; the phase moves its feet.
     Mouse(u8),
+    /// A hairball with this much left to wipe, 1 (a smear) to 3 (all of it).
+    Hairball(u8),
+    /// Glints where a hairball was wiped clean; the frame twinkles them.
+    Sparkle(u8),
 }
 
 /// The cat with its head lowered into a bowl in front of it, eyes shut.
@@ -111,6 +117,8 @@ fn prop_rows(prop: Prop) -> Vec<&'static str> {
             let feet = MOUSE_FEET[phase as usize % MOUSE_FEET.len()];
             MOUSE.iter().copied().chain([feet]).collect()
         }
+        Prop::Hairball(dirt) => hairball::hairball_rows(dirt).to_vec(),
+        Prop::Sparkle(frame) => hairball::sparkle_rows(frame).to_vec(),
     }
 }
 
@@ -121,7 +129,7 @@ fn prop_color(c: char) -> Option<Rgb> {
         'n' => Some([176, 112, 56]),
         'd' => Some([122, 72, 36]),
         // Outline and pink as on the cat; props never wear its coat.
-        other => Coat::Ginger.color(other),
+        other => hairball::color(other).or_else(|| Coat::Ginger.color(other)),
     }
 }
 
@@ -211,7 +219,15 @@ mod tests {
 
     #[test]
     fn props_sit_on_the_ground() {
-        for prop in [Prop::Bowl(3), Prop::Bowl(0), Prop::Mouse(0), Prop::Mouse(1)] {
+        for prop in [
+            Prop::Bowl(3),
+            Prop::Bowl(0),
+            Prop::Mouse(0),
+            Prop::Mouse(1),
+            Prop::Hairball(3),
+            Prop::Hairball(2),
+            Prop::Hairball(1),
+        ] {
             let frame = render_prop(prop, Facing::Right);
             assert_eq!(lowest_row(&frame, 0..PROP_W), Some(PROP_H - 1), "{prop:?}");
         }

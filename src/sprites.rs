@@ -3,10 +3,12 @@
 //! The cat is drawn facing right; left-facing frames are mirrored.
 
 mod coat;
+mod hairball;
 mod hanging;
 mod play;
 
 pub use coat::{Coat, Palette};
+pub use hairball::SPIT;
 pub use hanging::{Kick, SCRUFF};
 pub use play::{PROP_H, PROP_W, Prop, SWAT_PAW, render_prop};
 
@@ -77,6 +79,9 @@ pub enum Pose {
     Eat(u8),
     /// Batting at something with a front paw; the phase raises or strikes.
     Swat(u8),
+    /// Hunched over, coughing up a hairball: 0 catches its breath, 1 heaves,
+    /// `SPIT` brings it up.
+    Hack(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -369,6 +374,7 @@ pub fn render(look: &Look, coat: Coat) -> Frame {
         Pose::Ceiling(phase) => draw_upside_down(&mut grid, WALK_STRIDES[phase as usize % 4]),
         Pose::Eat(bite) => play::draw_eating(&mut grid, bite),
         Pose::Swat(phase) => play::draw_swatting(&mut grid, phase),
+        Pose::Hack(phase) => hairball::draw_hacking(&mut grid, phase),
     }
     draw_bubble(&mut grid, look.bubble);
 

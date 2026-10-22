@@ -44,6 +44,9 @@ use your regular Claude subscription, not API billing.
   under the built-in ones; a new photo with the same name replaces the old
   theme, and **Remove** deletes the one being worn. They are saved in
   `~/Library/Application Support/Meow/settings.json`.
+- **Now and then the cat coughs up a hairball** (or on demand: **Hairball** in
+  its menu). It stays on the floor until you clean it: scrub it with the mouse
+  button down, or click it a few times, until it sparkles and is gone.
 
 Requests use **Haiku** (latest version) by default, the cheapest Claude model,
 which is plenty for fetching from connectors and summarizing; sub-agents use it

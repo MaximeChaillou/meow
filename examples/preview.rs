@@ -3,7 +3,7 @@
 
 use meow::sprites::{
     Bubble, CANVAS_H, CANVAS_W, Coat, Facing, Frame, Kick, Look, PROP_H, PROP_W, Pose, Prop, Rgb,
-    render, render_prop,
+    SPIT, render, render_prop,
 };
 
 const SCALE: usize = 8;
@@ -75,6 +75,9 @@ fn main() {
         (Pose::Eat(1), Bubble::None, Facing::Right),
         (Pose::Swat(0), Bubble::None, Facing::Right),
         (Pose::Swat(1), Bubble::None, Facing::Right),
+        (Pose::Hack(0), Bubble::None, Facing::Right),
+        (Pose::Hack(1), Bubble::None, Facing::Right),
+        (Pose::Hack(SPIT), Bubble::None, Facing::Right),
     ];
     let props = [
         Prop::Bowl(3),
@@ -82,6 +85,11 @@ fn main() {
         Prop::Bowl(1),
         Prop::Mouse(0),
         Prop::Mouse(1),
+        Prop::Hairball(3),
+        Prop::Hairball(2),
+        Prop::Hairball(1),
+        Prop::Sparkle(0),
+        Prop::Sparkle(1),
     ];
     let row_h = CANVAS_H * SCALE;
     let cats_w = CANVAS_W * SCALE * looks.len();

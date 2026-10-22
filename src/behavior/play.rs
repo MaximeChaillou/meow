@@ -85,7 +85,7 @@ impl Cat {
         self.x + CAT_WIDTH / 2.0
     }
 
-    fn has_prop(&self) -> bool {
+    pub(super) fn has_prop(&self) -> bool {
         self.prey.is_some() || self.activity == Activity::Eating
     }
 
@@ -98,6 +98,7 @@ impl Cat {
                 | Activity::Eating
                 | Activity::Chasing
                 | Activity::Hunting
+                | Activity::Hacking
         )
     }
 
