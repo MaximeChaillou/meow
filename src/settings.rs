@@ -178,7 +178,10 @@ mod tests {
         assert_eq!(settings.coat, mochi().coat());
         assert_eq!(settings.current_custom(), Some(&mochi()));
         let names: Vec<_> = settings.coats().into_iter().map(|(name, _)| name).collect();
-        assert_eq!(names, ["Ginger", "Willow", "Alfie", "Dédé", "Mochi"]);
+        assert_eq!(
+            names,
+            ["Ginger", "Willow", "Alfie", "Dédé", "Corgi", "Mochi"]
+        );
     }
 
     #[test]
