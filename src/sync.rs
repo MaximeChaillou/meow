@@ -4,7 +4,7 @@
 
 use serde::Deserialize;
 
-use crate::tasks::{FoundTask, Task};
+use crate::tasks::{FoundTask, SLACK_NO_REPLY_RULE, Task};
 
 pub const SYNC_FENCE: &str = "meow-sync";
 /// How far back the very first check looks for new things.
@@ -60,15 +60,15 @@ pub fn prompt(open: &[&Task], handled: &[&Task], since: Option<u64>, now: u64) -
          launch sub-agents. Keep it quick.\n\n\
          1. For each open task below, check whether it is resolved at its source: Linear issue \
          done or canceled, pull request merged, closed or already reviewed by me, Slack message \
-         I have answered, email I have answered. {SLACK_REPLY_RULE} Only count it as resolved \
-         when you are sure.\n\
+         I have answered or that needs no answer, email I have answered. {SLACK_REPLY_RULE} \
+         {SLACK_NO_REPLY_RULE} Only count it as resolved when you are sure.\n\
          2. Find new things waiting on me {window}: Linear issues newly assigned to me, pull \
-         requests newly requesting my review, Slack DMs or mentions I have not answered, emails \
-         waiting for my answer. A search result shows the message, not what came after it: \
-         before reporting a Slack message, read its conversation (and its thread) from that \
-         message on, and leave it out if I answered there. {SLACK_REPLY_RULE} Skip anything in either list below, including the same message, \
-         issue or pull request under another title or link: I have dealt with the handled ones \
-         and do not want them back.\n\n\
+         requests newly requesting my review, Slack DMs or mentions I have not answered that need \
+         an answer, emails waiting for my answer. A search result shows the message, not what came \
+         after it: before reporting a Slack message, read its conversation (and its thread) from \
+         that message on, and leave it out if I answered there. {SLACK_REPLY_RULE} Skip anything \
+         in either list below, including the same message, issue or pull request under another \
+         title or link: I have dealt with the handled ones and do not want them back.\n\n\
          Open tasks (JSON):\n{}\n\n\
          Already handled, never report again (JSON):\n{}\n\n\
          Reply with only a fenced code block with the info string `{SYNC_FENCE}` holding \
@@ -152,6 +152,14 @@ mod tests {
             prompt.contains("before reporting a Slack message, read its conversation"),
             "a search hit alone does not show my reply"
         );
+    }
+
+    #[test]
+    fn prompt_skips_and_resolves_slack_messages_that_need_no_answer() {
+        let prompt = prompt(&[], &[], None, 100);
+        assert!(prompt.contains(SLACK_NO_REPLY_RULE));
+        assert!(prompt.contains("Slack message I have answered or that needs no answer"));
+        assert!(prompt.contains("I have not answered that need an answer"));
     }
 
     #[test]
