@@ -14,7 +14,7 @@ const MAX_CHECKED: usize = 40;
 /// At most this many handled tasks are sent, so they are not reported again.
 pub const MAX_HANDLED: usize = 40;
 /// How Claude should judge whether I answered on Slack.
-pub const SLACK_REPLY_RULE: &str = "On Slack, I have answered when I posted in the same DM      or channel after that message, in its thread or not, or reacted to it.";
+pub const SLACK_REPLY_RULE: &str = "On Slack, I have answered when I posted in the same DM or channel after that message, in its thread or not, or reacted to it.";
 
 /// What a check found.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -64,14 +64,17 @@ pub fn prompt(open: &[&Task], handled: &[&Task], since: Option<u64>, now: u64) -
          when you are sure.\n\
          2. Find new things waiting on me {window}: Linear issues newly assigned to me, pull \
          requests newly requesting my review, Slack DMs or mentions I have not answered, emails \
-         waiting for my answer. Skip anything in either list below, including the same message, \
+         waiting for my answer. A search result shows the message, not what came after it: \
+         before reporting a Slack message, read its conversation (and its thread) from that \
+         message on, and leave it out if I answered there. {SLACK_REPLY_RULE} Skip anything in either list below, including the same message, \
          issue or pull request under another title or link: I have dealt with the handled ones \
          and do not want them back.\n\n\
          Open tasks (JSON):\n{}\n\n\
          Already handled, never report again (JSON):\n{}\n\n\
          Reply with only a fenced code block with the info string `{SYNC_FENCE}` holding \
          {{\"done\": [ids of resolved tasks], \"new\": [{{\"title\": short imperative title, \
-         \"source\": \"Linear\"|\"GitHub\"|\"Slack\"|\"Gmail\", \"url\": link or null}}]}}.",
+         \"source\": \"Linear\"|\"GitHub\"|\"Slack\"|\"Gmail\", \"url\": link or null}}]}}. Give Slack messages \
+         and emails their link, which later checks need to tell when they are resolved.",
         serde_json::Value::Array(tasks),
         serde_json::Value::Array(handled)
     )
@@ -145,6 +148,10 @@ mod tests {
         assert!(prompt.contains("never report again"));
         assert!(prompt.contains("Review PR 3172"));
         assert!(prompt.contains("in its thread or not"));
+        assert!(
+            prompt.contains("before reporting a Slack message, read its conversation"),
+            "a search hit alone does not show my reply"
+        );
     }
 
     #[test]
