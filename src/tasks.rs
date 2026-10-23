@@ -14,6 +14,10 @@ pub const DONE_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 const MAX_FOUND: usize = 50;
 const MAX_TITLE_CHARS: usize = 200;
 const MANUAL_SOURCE: &str = "Me";
+/// Slack messages that need no answer, so "ok" or "super merci" never becomes a task.
+pub const SLACK_NO_REPLY_RULE: &str = "On Slack, a message that only acknowledges, thanks, \
+     agrees or wraps up (\"ok\", \"thanks\", \"super merci\", \"parfait\", a thumbs up), in any \
+     language, needs no answer and is never a task.";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
@@ -391,7 +395,7 @@ pub fn report_instruction() -> String {
         "At the very end of your answer, add a fenced code block with the info string \
          `{TASKS_FENCE}` holding a JSON array of the things I need to act on (not meetings or \
          FYIs), one object each: {{\"title\": short imperative title, \"source\": where it comes \
-         from (Linear, GitHub, Slack, Gmail…), \"url\": its link or null}}."
+         from (Linear, GitHub, Slack, Gmail…), \"url\": its link or null}}. {SLACK_NO_REPLY_RULE}"
     )
 }
 
@@ -409,6 +413,12 @@ mod tests {
 
     fn titles(list: &TaskList) -> Vec<&str> {
         list.display().iter().map(|t| t.title.as_str()).collect()
+    }
+
+    #[test]
+    fn report_leaves_out_slack_messages_that_need_no_answer() {
+        assert!(report_instruction().contains(SLACK_NO_REPLY_RULE));
+        assert!(SLACK_NO_REPLY_RULE.contains("super merci"));
     }
 
     #[test]
