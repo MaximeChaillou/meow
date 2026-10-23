@@ -7,15 +7,26 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use meow::conversations::ChatId;
 use meow::update::{self, Manifest};
 
 use super::App;
 use crate::ui::events::UiEvent;
+use crate::ui::notify;
 
 /// The first check waits for the app to settle.
 const FIRST_DELAY: Duration = Duration::from_secs(60);
 /// After a failed check (offline, repository private…).
 const RETRY_DELAY: Duration = Duration::from_secs(30 * 60);
+
+/// Where to answer a check the user asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Asked {
+    /// From the cat's menu: a macOS banner.
+    Banner,
+    /// With `/update` in this conversation.
+    Chat(ChatId),
+}
 
 /// A newer build, unpacked beside the app.
 struct Staged {
@@ -31,6 +42,10 @@ pub(super) struct UpdateState {
     next_at: Instant,
     check: Option<Receiver<Result<Option<Staged>, String>>>,
     staged: Option<Staged>,
+    /// Why `target` is `None`, to tell the user who asks for a check.
+    why_not: Option<&'static str>,
+    /// The user asked for the check under way (or about to start).
+    asked: Option<Asked>,
 }
 
 impl UpdateState {
@@ -40,6 +55,7 @@ impl UpdateState {
         let bundle = std::env::current_exe()
             .ok()
             .and_then(|exe| update::bundle_of(&exe));
+        let why_not = update::why_not_updating(update::own_commit(), bundle.is_some(), interval);
         let target = match (bundle, update::own_commit(), interval) {
             (Some(bundle), Some(own), Some(_)) if !snapshot => Some((bundle, own)),
             _ => None,
@@ -50,6 +66,8 @@ impl UpdateState {
             next_at: Instant::now() + FIRST_DELAY,
             check: None,
             staged: None,
+            why_not,
+            asked: None,
         }
     }
 }
@@ -63,6 +81,36 @@ pub(super) fn version_label() -> String {
 }
 
 impl App {
+    /// Checks for a new version now, answering where the user asked.
+    pub(super) fn check_for_updates(&mut self, asked: Asked) {
+        if self.update.target.is_none() {
+            let why = self
+                .update
+                .why_not
+                .unwrap_or("Updates are not available in this mode.");
+            return self.tell_update(&asked, why, false);
+        }
+        if let Some(staged) = &self.update.staged {
+            let message = update::outcome("", &Ok(Some(staged.manifest.short().to_string())));
+            return self.tell_update(&asked, &message, false);
+        }
+        if self.update.check.is_none() {
+            self.update.next_at = Instant::now();
+        }
+        if let Asked::Chat(id) = &asked {
+            self.info_in(id, "Checking for updates…");
+        }
+        self.update.asked = Some(asked);
+    }
+
+    fn tell_update(&mut self, asked: &Asked, message: &str, failed: bool) {
+        match asked {
+            Asked::Banner => notify::post("Meow", message),
+            Asked::Chat(id) if failed => self.error_in(id, message),
+            Asked::Chat(id) => self.info_in(id, message),
+        }
+    }
+
     pub(super) fn poll_update(&mut self) {
         let Some((bundle, own)) = self.update.target.clone() else {
             return;
@@ -85,6 +133,14 @@ impl App {
                     Ok(_) => self.update.interval,
                     Err(_) => RETRY_DELAY.min(self.update.interval),
                 };
+            if let Some(asked) = self.update.asked.take() {
+                let found = result
+                    .as_ref()
+                    .map(|staged| staged.as_ref().map(|s| s.manifest.short().to_string()))
+                    .map_err(Clone::clone);
+                let message = update::outcome(own, &found);
+                self.tell_update(&asked, &message, found.is_err());
+            }
             match result {
                 Ok(Some(staged)) => {
                     eprintln!("meow: update {} ready", staged.manifest.short());

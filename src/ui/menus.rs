@@ -216,6 +216,13 @@ pub fn cat_menu(
         theme,
         NSMenuItem::separatorItem(mtm),
         label(mtm, version),
+        item(
+            mtm,
+            "Check for Updates",
+            sel!(checkForUpdates:),
+            "",
+            Some(target),
+        ),
         item(mtm, "Quit Meow", sel!(quit:), "", Some(target)),
     ]);
     let cat_menu = menu(mtm, "Meow", &items);

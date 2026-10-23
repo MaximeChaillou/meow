@@ -75,6 +75,11 @@ define_class!(
             push(UiEvent::ReleaseMouse);
         }
 
+        #[unsafe(method(checkForUpdates:))]
+        fn check_for_updates(&self, _sender: Option<&AnyObject>) {
+            push(UiEvent::CheckForUpdates);
+        }
+
         #[unsafe(method(coughUp:))]
         fn cough_up(&self, _sender: Option<&AnyObject>) {
             push(UiEvent::CoughUp);

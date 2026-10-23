@@ -627,6 +627,7 @@ impl App {
             UiEvent::FocusLost if !self.chat.is_key() => self.chat.hide(),
             UiEvent::FocusLost => {}
             UiEvent::NewConversation => self.new_conversation(),
+            UiEvent::CheckForUpdates => self.check_for_updates(update::Asked::Banner),
             UiEvent::Quit => {
                 pointer::release();
                 self.slack.save_cache();

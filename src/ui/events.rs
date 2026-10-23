@@ -112,6 +112,8 @@ pub enum UiEvent {
     /// The bubble stopped being the focused window.
     FocusLost,
     NewConversation,
+    /// Check for a new version of Meow now.
+    CheckForUpdates,
     Quit,
 }
 

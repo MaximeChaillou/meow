@@ -68,6 +68,34 @@ pub fn is_update(own: &str, latest: &Manifest) -> bool {
     !own.trim().eq_ignore_ascii_case(&latest.commit)
 }
 
+/// What a check asked for by the user found, to tell them: `latest` is the
+/// short commit of a newer build just downloaded, `None` when this one is it.
+pub fn outcome(own: &str, result: &Result<Option<String>, String>) -> String {
+    match result {
+        Ok(Some(latest)) => format!(
+            "Meow {latest} is downloaded. Meow restarts to install it as soon as the chat \
+             is closed and nothing is running."
+        ),
+        Ok(None) => format!("Meow is up to date (version {}).", short(own)),
+        Err(error) => format!("Could not check for updates: {error}"),
+    }
+}
+
+/// Why this build cannot update, when it cannot; `bundled` says whether it
+/// runs from a `.app`, `interval` is [`check_interval`]'s answer.
+pub fn why_not_updating(
+    own: Option<&str>,
+    bundled: bool,
+    interval: Option<Duration>,
+) -> Option<&'static str> {
+    match (own, bundled, interval) {
+        (None, _, _) => Some("This is a local build of Meow: it does not update itself."),
+        (_, false, _) => Some("Meow is not running from Meow.app, so it cannot update itself."),
+        (_, _, None) => Some("Updates are turned off (MEOW_UPDATE_HOURS=0)."),
+        _ => None,
+    }
+}
+
 /// From `MEOW_UPDATE_HOURS` (default 6); `None` turns checks off.
 pub fn check_interval(hours: Option<&str>) -> Option<Duration> {
     let hours = hours
@@ -247,6 +275,44 @@ fn path_str(path: &Path) -> Result<&str, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const OWN: &str = "90220bc1111111111111111111111111111111111";
+
+    #[test]
+    fn outcome_tells_what_the_check_found() {
+        assert_eq!(
+            outcome(OWN, &Ok(None)),
+            "Meow is up to date (version 90220bc)."
+        );
+        assert!(
+            outcome(OWN, &Ok(Some("abc1234".into()))).starts_with("Meow abc1234 is downloaded.")
+        );
+        assert_eq!(
+            outcome(OWN, &Err("offline".into())),
+            "Could not check for updates: offline"
+        );
+    }
+
+    #[test]
+    fn only_bundled_release_builds_with_checks_on_update() {
+        let hours = Some(Duration::from_secs(3600));
+        assert_eq!(why_not_updating(Some(OWN), true, hours), None);
+        assert!(
+            why_not_updating(None, true, hours)
+                .unwrap()
+                .contains("local build")
+        );
+        assert!(
+            why_not_updating(Some(OWN), false, hours)
+                .unwrap()
+                .contains("Meow.app")
+        );
+        assert!(
+            why_not_updating(Some(OWN), true, None)
+                .unwrap()
+                .contains("turned off")
+        );
+    }
 
     const COMMIT: &str = "90220bc5d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6";
     const SUM: &str = "4f8b42c22dd3729b519ba6f68d2da7cc5b2d606d05daed5ad5128cc03e6c6358";
