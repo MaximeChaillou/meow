@@ -344,6 +344,24 @@ pub fn chat_prompt(task: &Task, message: &str) -> String {
     )
 }
 
+/// What the user says when they tick a task as done and want the person who
+/// asked to know: Claude drafts the reply where the request was made, never sends it.
+pub const DONE_REPLY_REQUEST: &str = "Done. Draft my reply to say so.";
+
+/// The instruction behind [`DONE_REPLY_REQUEST`].
+pub fn done_reply_prompt() -> String {
+    format!(
+        "{DONE_REPLY_REQUEST}\n\nI have done what this task asks. Find the original request \
+         (the Slack message or thread, the email, the issue) and who made it, then prepare a \
+         short reply in my name saying it is done, with the useful detail (new time, link, \
+         result), in the language of the conversation. Leave it as a draft where the request \
+         was made: a Slack draft in the same DM or thread (`slack_send_message_draft`, with \
+         `thread_ts` for a thread), or a Gmail draft in the same thread. Never send or post \
+         anything. If you cannot tell who asked or where, ask me instead of guessing. Then tell \
+         me in one line where the draft is."
+    )
+}
+
 /// Asks Claude to report the actionable items of its answer as tasks.
 pub fn report_instruction() -> String {
     format!(
