@@ -54,7 +54,8 @@ use your regular Claude subscription, not API billing.
 Requests use **Haiku** (latest version) by default, the cheapest Claude model,
 which is plenty for fetching from connectors and summarizing; sub-agents use it
 too. Claude runs with `--permission-mode auto` in your home directory, with your
-usual Claude Code settings, MCP servers and skills.
+usual Claude Code settings, MCP servers and skills, plus Meow's own tools (see
+[Meow's data in the chat](#meows-data-in-the-chat)).
 
 ## Look
 
@@ -265,6 +266,26 @@ Superset app (its `superset` CLI is found on your PATH or in `~/.superset/bin`).
 Meow used to be called Lazy: on first launch it moves data saved under the old
 name (`~/Library/Application Support/Lazy`, `~/.config/lazy`) to the new folders.
 
+### Meow's data in the chat
+
+Claude knows it is talking to you from Meow, and can look at what Meow sees.
+Chat messages, quick actions, task conversations and scheduled tasks run with
+a short description of Meow added to Claude's system prompt, and with Meow
+itself as an MCP server named `meow` (the app's binary, started by Claude as
+`meow --mcp`). Its tools only read:
+
+- **Slack**, through Meow's own Slack session: `slack_conversations` (DMs,
+  group DMs and channels, with unread state), `slack_history`, `slack_thread`
+  and `slack_search` (Slack's search syntax, e.g. `from:@ana in:#eng`). So "what
+  did Ana ask me this morning?" works without a Slack connector. The session is
+  read from the Keychain only when a tool needs Slack.
+- **Meow**: `meow_tasks`, `meow_activity`, `meow_quick_actions` (each action's
+  last result, today's plan among them) and `meow_scheduled`.
+
+Nothing can be sent or changed through them; replies on Slack go through the
+Slack page. Runs that are deliberately cut off (offline prompts, the calendar
+and RSVP runs, reading a cat photo) do not get them.
+
 ### Settings (environment variables)
 
 | Variable          | Default                       | Effect                          |
@@ -309,6 +330,8 @@ Claude's panel, filled with sample messages) as a PNG there, then quits. Snapsho
 | `src/transcript.rs`        | Conversation model: turns with foldable working steps      |
 | `src/markdown.rs`          | Markdown → styled spans for the transcript                |
 | `src/claude.rs`            | Runs `claude -p --output-format stream-json`, parses it   |
+| `src/mcp.rs`               | A minimal stdio MCP server (JSON-RPC, tools only)         |
+| `src/context/`             | Meow as Claude's `meow` MCP server: system prompt, Slack and local-data tools |
 | `src/superset.rs`          | The `superset` CLI: projects, workspaces, agents          |
 | `src/agent.rs`             | Coding agents: `meow-agent` proposals, prompts, transcript parsing |
 | `src/agent_run.rs`         | One agent launch: worktree, open, start, follow its transcript |

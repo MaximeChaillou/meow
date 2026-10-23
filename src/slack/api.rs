@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use super::auth::Credentials;
 use super::http::Http;
-use super::model::{self, Activity, AuthTest, Channel, Message, Page, SlackError, User};
+use super::model::{self, Activity, AuthTest, Channel, Message, Page, SearchHit, SlackError, User};
 
 /// Conversation kinds to list for the first version: DMs and group DMs.
 pub const DIRECT_TYPES: &str = "im,mpim";
@@ -203,6 +203,21 @@ impl<H: Http> SlackApi<H> {
         }
         all.truncate(limit);
         Ok(all)
+    }
+
+    /// Up to `count` messages matching `query` (Slack's search syntax), newest first.
+    pub fn search(&self, query: &str, count: u16) -> Result<Vec<SearchHit>, ApiError> {
+        let count = count.to_string();
+        let body = self.call(
+            "search.messages",
+            &[
+                ("query", query),
+                ("count", &count),
+                ("sort", "timestamp"),
+                ("sort_dir", "desc"),
+            ],
+        )?;
+        model::parse_search_hits(&body).map_err(ApiError::Slack)
     }
 
     /// Every member of a conversation, following pagination.
@@ -488,6 +503,23 @@ mod tests {
             r#"{"ok":false,"error":"channel_not_found"}"#,
         ]));
         assert!(api.mark("D1", "1.0").is_err());
+    }
+
+    #[test]
+    fn search_sends_the_query_newest_first() {
+        let api = api(FakeHttp::with(&[
+            r#"{"ok":true,"messages":{"matches":[{"text":"hi","ts":"1.0"}]}}"#,
+        ]));
+        let hits = api.search("release in:#eng", 20).unwrap();
+        assert_eq!(hits[0].text, "hi");
+        let call = api.http.last();
+        assert!(call.url.ends_with("/api/search.messages"));
+        assert!(
+            call.params
+                .contains(&("query".into(), "release in:#eng".into()))
+        );
+        assert!(call.params.contains(&("count".into(), "20".into())));
+        assert!(call.params.contains(&("sort_dir".into(), "desc".into())));
     }
 
     #[test]

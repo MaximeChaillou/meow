@@ -5,6 +5,11 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 
 fn main() {
+    // Claude starts the binary as its MCP server for Meow's data.
+    if std::env::args().nth(1).as_deref() == Some(meow::context::MCP_FLAG) {
+        meow::context::serve();
+        return;
+    }
     let Some(mtm) = MainThreadMarker::new() else {
         eprintln!("meow must start on the main thread");
         std::process::exit(1);

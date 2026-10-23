@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use crate::context;
+
 const PERMISSION_MODE: &str = "auto";
 /// Haiku (always its latest version): cheap and quick, and enough for fetching
 /// from connectors and summarizing. `MEOW_MODEL` picks another (e.g. `sonnet`).
@@ -160,6 +162,9 @@ pub struct ClaudeEnv {
     pub cwd: PathBuf,
     /// Model for requests and for the sub-agents they launch.
     pub model: String,
+    /// Meow's own binary, served to Claude as the `meow` MCP server; `None`
+    /// leaves Claude without Meow's tools.
+    pub meow_bin: Option<PathBuf>,
 }
 
 impl ClaudeEnv {
@@ -187,6 +192,7 @@ impl ClaudeEnv {
             path_var,
             cwd,
             model,
+            meow_bin: std::env::current_exe().ok(),
         })
     }
 }
@@ -266,7 +272,15 @@ const SUPERSET_HOME_VAR: &str = "SUPERSET_HOME_DIR";
 
 impl Run {
     pub fn start(env: &ClaudeEnv, prompt: &str, session: Option<&str>) -> Result<Self, String> {
-        Self::spawn(env, prompt, session, &env.model, PERMISSION_MODE, &[])
+        let args = app_context_args(env);
+        Self::spawn(
+            env,
+            prompt,
+            session,
+            &env.model,
+            PERMISSION_MODE,
+            &as_strs(&args),
+        )
     }
 
     /// A one-off call with no tools and no MCP servers: Claude can only read
@@ -283,7 +297,8 @@ impl Run {
     /// A one-off call with the user's tools, skills and connectors, read-only:
     /// Claude can look things up but not change or send anything.
     pub fn start_read_only(env: &ClaudeEnv, prompt: &str, model: &str) -> Result<Self, String> {
-        Self::spawn(env, prompt, None, model, READ_ONLY_MODE, &[])
+        let args = app_context_args(env);
+        Self::spawn(env, prompt, None, model, READ_ONLY_MODE, &as_strs(&args))
     }
 
     /// [`Run::start`], read-only: a chat message that may look things up but
@@ -293,7 +308,15 @@ impl Run {
         prompt: &str,
         session: Option<&str>,
     ) -> Result<Self, String> {
-        Self::spawn(env, prompt, session, &env.model, READ_ONLY_MODE, &[])
+        let args = app_context_args(env);
+        Self::spawn(
+            env,
+            prompt,
+            session,
+            &env.model,
+            READ_ONLY_MODE,
+            &as_strs(&args),
+        )
     }
 
     /// A one-off call that may use only the `allowed` MCP tools: no built-in
@@ -396,6 +419,32 @@ impl Drop for Run {
     fn drop(&mut self) {
         self.cancel();
     }
+}
+
+/// What tells Claude it runs inside Meow: the description of Meow appended to
+/// its system prompt, and Meow's read-only tools, alongside the user's own
+/// MCP servers. Only the prompt when Meow's binary is unknown.
+fn app_context_args(env: &ClaudeEnv) -> Vec<String> {
+    let prompt = [
+        "--append-system-prompt".to_string(),
+        context::system_prompt(),
+    ];
+    let tools = env.meow_bin.as_deref().map(|bin| {
+        [
+            "--mcp-config".to_string(),
+            context::mcp_config(bin),
+            "--allowedTools".to_string(),
+            context::allowed_tools(),
+        ]
+    });
+    prompt
+        .into_iter()
+        .chain(tools.into_iter().flatten())
+        .collect()
+}
+
+fn as_strs(args: &[String]) -> Vec<&str> {
+    args.iter().map(String::as_str).collect()
 }
 
 /// The permission rule reading anything under `dir`: an absolute path is
@@ -657,6 +706,7 @@ mod tests {
             path_var: "/bin:/usr/bin".into(),
             cwd: dir.clone(),
             model: DEFAULT_MODEL.into(),
+            meow_bin: None,
         };
         (env, dir)
     }
@@ -688,20 +738,62 @@ mod tests {
 
     #[test]
     fn run_passes_model_resume_flag_and_prompt() {
+        // The arguments go to a file: the system prompt outgrows stderr's tail.
         let (env, dir) = fake_claude(
             "resume",
             "prompt=$(cat)\n\
-             echo \"$@ | sub=$CLAUDE_CODE_SUBAGENT_MODEL | superset=${SUPERSET_HOME_DIR:-none} | $prompt\" >&2\n\
+             echo \"$@ | sub=$CLAUDE_CODE_SUBAGENT_MODEL | superset=${SUPERSET_HOME_DIR:-none} | $prompt\" > args.txt\n\
              exit 1",
         );
         let run = Run::start(&env, "do it", Some("s42")).unwrap();
         let events: Vec<_> = run.events.iter().collect();
-        let [ClaudeEvent::Failed(msg)] = &events[..] else {
-            panic!("{events:?}");
-        };
-        assert!(msg.contains("--model haiku --resume s42"), "{msg}");
-        assert!(msg.contains("sub=haiku | superset=none | do it"), "{msg}");
+        assert!(
+            matches!(&events[..], [ClaudeEvent::Failed(_)]),
+            "{events:?}"
+        );
+        let args = std::fs::read_to_string(dir.join("args.txt")).unwrap();
+        assert!(args.contains("--model haiku --resume s42"), "{args}");
+        assert!(args.contains("sub=haiku | superset=none | do it"), "{args}");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn chat_runs_get_meow_context_and_offline_runs_do_not() {
+        let script = "cat > /dev/null\nprintf '%s\\n' \"$@\" > args.txt\nexit 1";
+        let (mut env, dir) = fake_claude("context", script);
+        env.meow_bin = Some(PathBuf::from("/Apps/Meow/meow"));
+        let args_of = |run: Run| {
+            let events: Vec<_> = run.events.iter().collect();
+            assert!(
+                matches!(&events[..], [ClaudeEvent::Failed(_)]),
+                "{events:?}"
+            );
+            std::fs::read_to_string(dir.join("args.txt")).unwrap()
+        };
+        let chat = args_of(Run::start(&env, "hi", None).unwrap());
+        assert!(chat.contains("--append-system-prompt\nYou are the assistant built into Meow"));
+        assert!(chat.contains("\"command\":\"/Apps/Meow/meow\""), "{chat}");
+        assert!(chat.contains("--allowedTools\nmcp__meow\n"), "{chat}");
+        let planning = args_of(Run::start_planning(&env, "hi", None).unwrap());
+        assert!(planning.contains("--mcp-config"), "{planning}");
+        let offline = args_of(Run::start_offline(&env, "hi").unwrap());
+        assert!(!offline.contains("--mcp-config"), "{offline}");
+        assert!(!offline.contains("--append-system-prompt"), "{offline}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn without_meow_binary_only_the_prompt_is_added() {
+        let env = ClaudeEnv {
+            binary: PathBuf::from("claude"),
+            path_var: String::new(),
+            cwd: PathBuf::from("/"),
+            model: DEFAULT_MODEL.into(),
+            meow_bin: None,
+        };
+        let args = app_context_args(&env);
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "--append-system-prompt");
     }
 
     #[test]

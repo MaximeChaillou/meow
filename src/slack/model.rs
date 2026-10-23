@@ -269,6 +269,42 @@ pub fn parse_search(body: &str) -> Result<Page<String>, SlackError> {
     })
 }
 
+/// A message found by `search.messages`, with where and when it was posted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchHit {
+    pub channel_id: String,
+    /// The channel's name; for a direct message, Slack gives the other person's id.
+    pub channel_name: String,
+    pub user: Option<String>,
+    /// The author's name as Slack gave it.
+    pub username: String,
+    pub ts: String,
+    /// Raw `mrkdwn`.
+    pub text: String,
+    pub permalink: Option<String>,
+}
+
+/// Parses a `search.messages` body into its matches, newest first as asked.
+pub fn parse_search_hits(body: &str) -> Result<Vec<SearchHit>, SlackError> {
+    let raw: SearchResponse = decode(body)?;
+    ok(raw.ok, raw.error)?;
+    Ok(raw
+        .messages
+        .matches
+        .into_iter()
+        .filter(|m| !m.text.trim().is_empty())
+        .map(|m| SearchHit {
+            channel_id: m.channel.id,
+            channel_name: m.channel.name,
+            user: m.user,
+            username: m.username,
+            ts: m.ts,
+            text: m.text,
+            permalink: m.permalink,
+        })
+        .collect())
+}
+
 /// Parses a `conversations.members` body into user ids.
 pub fn parse_members(body: &str) -> Result<Page<String>, SlackError> {
     let raw: MembersResponse = decode(body)?;
@@ -670,6 +706,24 @@ struct RawSearchMessages {
 struct RawSearchMatch {
     #[serde(default)]
     text: String,
+    #[serde(default)]
+    channel: RawSearchChannel,
+    #[serde(default)]
+    user: Option<String>,
+    #[serde(default)]
+    username: String,
+    #[serde(default)]
+    ts: String,
+    #[serde(default)]
+    permalink: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawSearchChannel {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -1003,6 +1057,27 @@ mod tests {
         assert_eq!(page.next_cursor.as_deref(), Some("2"));
         let last = r#"{"ok":true,"messages":{"paging":{"page":3,"pages":3},"matches":[]}}"#;
         assert_eq!(parse_search(last).unwrap().next_cursor, None);
+    }
+
+    #[test]
+    fn search_hits_keep_channel_author_and_ts() {
+        let body = r#"{"ok":true,"messages":{"matches":[
+            {"text":"ship it","ts":"5.0","user":"U2","username":"ana",
+             "channel":{"id":"C1","name":"releases"},"permalink":"https://x/p5"},
+            {"text":" "}]}}"#;
+        let hits = parse_search_hits(body).unwrap();
+        assert_eq!(
+            hits,
+            [SearchHit {
+                channel_id: "C1".into(),
+                channel_name: "releases".into(),
+                user: Some("U2".into()),
+                username: "ana".into(),
+                ts: "5.0".into(),
+                text: "ship it".into(),
+                permalink: Some("https://x/p5".into()),
+            }]
+        );
     }
 
     #[test]
