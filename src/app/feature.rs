@@ -251,7 +251,9 @@ impl Host for AppHost<'_> {
 
 impl App {
     pub(super) fn poll_features(&mut self) {
-        // Out of `self` while they run, so each can be handed the app.
+        // Out of `self` while they run, so each can be handed the app. So the
+        // app code a `Host` method reaches (e.g. `run_quick_action` starting a
+        // request) must not use `self.features`: it is empty meanwhile.
         let mut features = std::mem::take(&mut self.features);
         for index in 0..features.len() {
             let (before, rest) = features.split_at_mut(index);
