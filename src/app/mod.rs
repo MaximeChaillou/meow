@@ -11,7 +11,6 @@ pub(crate) mod mailbox;
 mod plan;
 mod quick_actions;
 mod requests;
-mod routines;
 mod rsvp;
 mod schedule;
 mod slack;
@@ -141,8 +140,6 @@ struct App {
     rsvp: rsvp::RsvpState,
     /// What happened in the background, for the Activity page.
     activity: activity::ActivityState,
-    /// Scheduled tasks and watches.
-    routines: routines::RoutineState,
     /// Coding agents started in Superset from the chat or Slack.
     agents: agents::AgentsState,
     /// Work started from Slack messages, waiting for approval.
@@ -168,7 +165,7 @@ pub fn start(mtm: MainThreadMarker) {
     let controller = Controller::new(mtm);
     let (actions, actions_error) = load_actions();
     let (settings, settings_path, settings_error) = coat::load_settings();
-    let features = crate::features::all();
+    let mut features = crate::features::all();
     menus::install_main_menu(mtm, &controller);
     let (cat_menu, coat_menu) = menus::cat_menu(
         mtm,
@@ -179,7 +176,9 @@ pub fn start(mtm: MainThreadMarker) {
     );
     let cat_window = CatWindow::new(mtm, &cat_menu);
     let prop_window = CatWindow::prop(mtm);
-    let chat = ChatWindow::new(mtm, &controller, &actions);
+    let pages: Vec<_> = features.iter().filter_map(|f| f.page()).collect();
+    let chat = ChatWindow::new(mtm, &controller, &actions, &pages);
+    feature::attach_pages(mtm, &mut features, &chat);
     chat.set_size(settings.window_size.points());
     chat.set_coat(settings.coat);
 
@@ -195,15 +194,12 @@ pub fn start(mtm: MainThreadMarker) {
     let (action_results, results_path, results_error) =
         quick_actions::load_action_results(&actions);
     let (activity_state, activity_error) = activity::ActivityState::load();
-    let (routine_state, routines_error) = routines::RoutineState::load();
-    chat.render_routines(&routine_state.routines, None, now_secs());
     let (autopilot_state, autopilot_error) = autopilot::AutopilotState::load();
     chat.render_autopilot(&autopilot_state.jobs, settings.autopilot, now_secs());
     chat.render_activity(&activity_state.log, now_secs());
     crate::ui::notify::request_permission();
     let startup_errors = [
         &activity_error,
-        &routines_error,
         &autopilot_error,
         &fonts_error,
         &actions_error,
@@ -211,9 +207,11 @@ pub fn start(mtm: MainThreadMarker) {
         &results_error,
         &settings_error,
     ];
+    let feature_errors: Vec<_> = features.iter().filter_map(|f| f.startup_error()).collect();
     for error in startup_errors
         .into_iter()
         .flatten()
+        .chain(&feature_errors)
         .chain(&migration_errors)
     {
         eprintln!("meow: {error}");
@@ -268,7 +266,9 @@ pub fn start(mtm: MainThreadMarker) {
         rng: Rng::new(seed()),
         last_look: None,
         last_tick: Instant::now(),
-        unread: startup_errors.iter().any(|e| e.is_some()) || !migration_errors.is_empty(),
+        unread: startup_errors.iter().any(|e| e.is_some())
+            || !feature_errors.is_empty()
+            || !migration_errors.is_empty(),
         unread_chat: ChatId::Main,
         claude: None,
         discovery: Some(discovery),
@@ -284,7 +284,6 @@ pub fn start(mtm: MainThreadMarker) {
         agenda: agenda::AgendaState::from_env(),
         rsvp: rsvp::RsvpState::default(),
         activity: activity_state,
-        routines: routine_state,
         agents: agents::AgentsState::default(),
         autopilot: autopilot_state,
         features,
@@ -410,7 +409,6 @@ impl App {
         self.poll_agenda();
         self.poll_rsvp();
         self.poll_cat_photo();
-        self.poll_routines();
         self.poll_agents();
         self.poll_autopilot();
         self.poll_snapshot();
@@ -606,8 +604,7 @@ impl App {
             UiEvent::OpenActivity(row) => self.open_activity(row),
             UiEvent::DismissActivity(row) => self.dismiss_activity(row),
             UiEvent::ClearActivity => self.clear_activity(),
-            UiEvent::ShowRoutines => self.show_routines(),
-            UiEvent::DeleteRoutine(row) => self.delete_routine(row),
+            UiEvent::ShowPage(page) => self.open_page(page),
             UiEvent::ShowAutopilot => self.show_autopilot(),
             UiEvent::ToggleAutopilot => self.toggle_autopilot(),
             UiEvent::ApproveAutopilot(tag) => self.decide_autopilot(tag, true),

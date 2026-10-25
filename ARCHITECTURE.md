@@ -24,7 +24,9 @@ src/
     mailbox.rs        a feature's own message queue
   features/           one folder per feature (the app side of it)
     mod.rs            the registry: `mod x;` and one entry in `all()`
-    update/           mod.rs (state, messages, `impl Feature`), tests.rs
+    fake_host.rs      the `Host` feature tests use
+    routines/         mod.rs (state, messages, `impl Feature`), page.rs, tests.rs
+    update/           mod.rs, tests.rs
   ui/                 AppKit building blocks: windows, pages, widgets, menus
     action.rs         an Objective-C target that runs a closure
 docs/features/        one page of user documentation per feature
@@ -39,7 +41,10 @@ A feature lives in `src/features/<name>/` and owns:
   its menu items, buttons and commands, and drained in `poll`;
 - **its UI wiring**: menu items as `MenuEntry` values whose closures send to
   the mailbox (`ui::action::Action` does the same for buttons);
-- **its commands**: `/name` typed in the chat, through `Feature::command`;
+- **its page**, if any: a `PageSpec` (sidebar row, header, count chip) and the
+  view it builds and draws itself (`features/routines/page.rs`);
+- **its part in the chat**: `/name` commands, text added to each chat prompt,
+  and fenced blocks it reads out of Claude's replies;
 - **its tests**: `tests.rs`, against a fake `Host`, so no AppKit is needed;
 - **its docs**: `docs/features/<name>.md`, with its environment variables.
 
@@ -49,17 +54,33 @@ own; the feature folder holds the app side.
 
 ```rust
 pub(crate) trait Feature {
-    fn poll(&mut self, host: &mut dyn Host);                // every tick
-    fn command(&mut self, text: &str, chat: &ChatId) -> bool; // `/update`…
-    fn menu(&self) -> Vec<MenuEntry>;                       // cat's menu items
-    fn is_busy(&self) -> bool;                              // a restart would lose work
+    fn poll(&mut self, host: &mut dyn Host);             // every tick
+    fn startup_error(&self) -> Option<String>;           // saved data unreadable
+    fn command(&mut self, text: &str, chat: &ChatId) -> bool;          // `/update`…
+    fn chat_instruction(&self, now: u64) -> Option<String>;            // into chat prompts
+    fn read_reply(&mut self, chat: &ChatId, text: &str, done: bool) -> String; // its blocks out
+    fn menu(&self) -> Vec<MenuEntry>;                    // cat's menu items
+    fn page(&self) -> Option<PageSpec>;                  // sidebar row
+    fn build_page(&mut self, mtm, frame) -> Option<Retained<NSView>>;  // once, at launch
+    fn page_shown(&mut self);                            // about to be shown
+    fn is_busy(&self) -> bool;                           // a restart would lose work
 }
 ```
 
-A feature reaches the rest of the app only through `Host` (write in a
-conversation, post a banner, ask whether the app is idle, quit). When a feature
-needs something new from the app, add one method to `Host` rather than
-handing out `App`. Features do not call each other.
+Every method but `poll` has a default, so a feature implements only what it
+uses. A feature reaches the rest of the app only through `Host`: write in a
+conversation, post a banner, record an Activity item, get the Claude setup,
+set its sidebar count, ask whether the app is idle, quit. When a feature needs
+something new from the app, add one method to `Host` rather than handing out
+`App`. Features do not call each other.
+
+Drawing happens in `poll`: a feature marks itself dirty when its data changes
+or its page is shown, and redraws its page and count there. Snapshot mode
+(`MEOW_SNAPSHOT_DIR`) saves every feature page as `<id>.png`, with no change
+to `app/snapshot.rs`.
+
+`ui/` never imports from `app/` or `features/`: the examples compile it on
+its own (`#[path = "../src/ui/mod.rs"]`).
 
 ### Adding one
 
@@ -87,23 +108,27 @@ exists to retire.
 
 ## Migration status
 
-`update` is the first feature moved to `src/features/`. The rest still live in
+Moved to `src/features/`: `update`, `routines`. The rest still live in
 `src/app/*.rs` as `impl App` blocks, with fields on `App`, `UiEvent` variants
 and `Controller` methods. Move them one PR each, roughly from the least to the
 most entangled:
 
-1. `activity`, `routines`, `coat`
-2. `autopilot`, `agents`
+1. `coat`, `agents`
+2. `autopilot`
 3. `plan`, `agenda`, `rsvp`, `schedule`, `quick_actions`
 4. `tasks`, `sync`, `task_actions`
 5. `slack`, split into its parts: conversations, `slack_assist`,
    `slack_voice`, `slack_emoji`, `slack_calendar`
 
-Moving these needs the core pieces the update feature did not: sidebar pages
-registered by features (in place of the `Page` enum and `ChatWindow`'s named
-pages), settings stored as one section per feature (in place of one `Settings`
-struct), and debug snapshots provided by each feature. Each lands with the
-first feature that needs it.
+**Activity is not a feature but a core service**: six modules write to it,
+its items open other pages, and it drives the news bubble over the cat.
+Features write to it with `Host::record`; it stays in `src/app/activity.rs`.
+
+Still to build, each with the first feature that needs it: settings stored as
+one section per feature (in place of one `Settings` struct, for `coat` and
+`autopilot`), and a way for a feature to open another page (for `autopilot`'s
+links). Once the app's own pages move too, `Page` and `Selection` keep only
+`Feature`.
 
 ## Module map (library and not yet moved code)
 
@@ -134,6 +159,7 @@ first feature that needs it.
 | `src/agent_run.rs`         | One agent launch: worktree, open, start, follow its transcript |
 | `src/update.rs`            | Releases: `version.json`, download, staging, swap and relaunch |
 | `src/slack/`               | Live Slack: sign-in credentials, Web API, background client, message model and `mrkdwn` formatting |
+| `src/routines.rs`          | Scheduled tasks: `meow-schedule` parsing, when each is due, prompts |
 | `src/app/`                 | 30 Hz tick tying the cat, chat, hotkey and runs together  |
 | `src/ui/`                  | AppKit: speech-bubble window, sidebar, chat/task/plan pages, theme, menus |
 

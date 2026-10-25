@@ -6,15 +6,15 @@ use std::cell::{Cell, RefCell};
 use meow::actions::QuickAction;
 use meow::activity::ActivityLog;
 use meow::autopilot::Jobs;
-use meow::routines::Routines;
 use meow::tasks::TaskList;
+use objc2::Message;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadMarker, sel};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSAutoresizingMaskOptions,
     NSBitmapImageFileType, NSButton, NSColor, NSLineBreakMode, NSStatusWindowLevel,
-    NSTextAlignment, NSTextField, NSView, NSWindowCollectionBehavior,
+    NSTextAlignment, NSTextField, NSView, NSWindowCollectionBehavior, NSWindowOrderingMode,
 };
 use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
@@ -25,9 +25,8 @@ use super::chat_page::ChatPage;
 use super::controller::Controller;
 use super::plan_page::PlanPage;
 use super::rich_text::{self, Attributes};
-use super::routines_page::RoutinesPage;
 use super::screens;
-use super::sidebar::{self, Page, Selection, Sidebar};
+use super::sidebar::{self, Page, PageSpec, Selection, Sidebar};
 use super::slack_page::SlackPage;
 use super::task_page::TaskPage;
 use super::theme;
@@ -54,8 +53,13 @@ pub struct ChatWindow {
     plan: PlanPage,
     slack: SlackPage,
     activity: ActivityPage,
-    routines: RoutinesPage,
     autopilot: AutopilotPage,
+    /// The features' pages, as listed in the sidebar.
+    feature_pages: Vec<PageSpec>,
+    /// Their views once built, by page id (see `add_page`).
+    feature_views: RefCell<Vec<(&'static str, Retained<NSView>)>>,
+    /// Where pages go in the bubble.
+    page_frame: NSRect,
     page: Cell<Page>,
     /// Top line of the page: "Chat", "Tasks", or the task being discussed.
     header: Retained<NSTextField>,
@@ -72,10 +76,13 @@ pub struct ChatWindow {
 }
 
 impl ChatWindow {
+    /// The bubble, with a sidebar row for each of the features' `pages`; their
+    /// views come next, with `add_page`.
     pub fn new(
         mtm: MainThreadMarker,
         controller: &Retained<Controller>,
         actions: &[QuickAction],
+        pages: &[PageSpec],
     ) -> Self {
         let panel = make_panel(mtm);
         let bubble = BubbleView::new(mtm, rect(0.0, 0.0, WIDTH, HEIGHT));
@@ -88,7 +95,7 @@ impl ChatWindow {
         panel.setDelegate(Some(ProtocolObject::from_ref(&**controller)));
 
         let inner = bubble.content_rect();
-        let sidebar = Sidebar::new(mtm, controller, actions, inner);
+        let sidebar = Sidebar::new(mtm, controller, actions, pages, inner);
         bubble.addSubview(&sidebar.view);
         bubble.set_sidebar_right(inner.origin.x + sidebar::WIDTH);
 
@@ -105,14 +112,12 @@ impl ChatWindow {
         let plan = PlanPage::new(mtm, controller, page_frame);
         let slack = SlackPage::new(mtm, controller, page_frame);
         let activity = ActivityPage::new(mtm, controller, page_frame);
-        let routines = RoutinesPage::new(mtm, controller, page_frame);
         let autopilot = AutopilotPage::new(mtm, controller, page_frame);
         bubble.addSubview(&chat.view);
         bubble.addSubview(&tasks.view);
         bubble.addSubview(&plan.view);
         bubble.addSubview(&slack.view);
         bubble.addSubview(&activity.view);
-        bubble.addSubview(&routines.view);
         bubble.addSubview(&autopilot.view);
         bubble.addSubview(&close_button(mtm, controller, inner));
         let header = NSTextField::labelWithString(&NSString::from_str(""), mtm);
@@ -165,8 +170,10 @@ impl ChatWindow {
             plan,
             slack,
             activity,
-            routines,
             autopilot,
+            feature_pages: pages.to_vec(),
+            feature_views: RefCell::new(Vec::new()),
+            page_frame,
             page: Cell::new(Page::Chat),
             header,
             subtitle,
@@ -201,14 +208,26 @@ impl ChatWindow {
         &self.activity
     }
 
-    pub fn routines(&self) -> &RoutinesPage {
-        &self.routines
+    /// Where a page's view goes in the bubble, for `add_page`.
+    pub fn page_frame(&self) -> NSRect {
+        self.page_frame
     }
 
-    /// Redraws the Scheduled page and the active count in the sidebar.
-    pub fn render_routines(&self, routines: &Routines, running: Option<u64>, now: u64) {
-        self.routines.render(routines, running, now);
-        self.sidebar.set_active_routines(routines.active_count());
+    /// Puts feature page `id`'s view in the bubble, hidden until shown. It
+    /// goes under the app's pages, so never over the header or close button.
+    pub fn add_page(&self, id: &'static str, view: &NSView) {
+        view.setHidden(self.page() != Page::Feature(id));
+        self.bubble.addSubview_positioned_relativeTo(
+            view,
+            NSWindowOrderingMode::Below,
+            Some(&self.chat.view),
+        );
+        self.feature_views.borrow_mut().push((id, view.retain()));
+    }
+
+    /// The count at the end of feature page `id`'s row in the sidebar.
+    pub fn set_badge(&self, id: &str, count: usize) {
+        self.sidebar.set_badge(id, count);
     }
 
     pub fn autopilot(&self) -> &AutopilotPage {
@@ -256,8 +275,10 @@ impl ChatWindow {
         self.plan.view.setHidden(page != Page::Plan);
         self.slack.view.setHidden(page != Page::Slack);
         self.activity.view.setHidden(page != Page::Activity);
-        self.routines.view.setHidden(page != Page::Routines);
         self.autopilot.view.setHidden(page != Page::Autopilot);
+        for (id, view) in self.feature_views.borrow().iter() {
+            view.setHidden(page != Page::Feature(id));
+        }
         self.refresh_header();
         self.focus();
     }
@@ -275,8 +296,12 @@ impl ChatWindow {
             Page::Tasks => (self.tasks_title.borrow().clone(), Selection::Tasks, false),
             Page::Slack => ("Slack".to_string(), Selection::Slack, false),
             Page::Activity => ("Activity".to_string(), Selection::Activity, false),
-            Page::Routines => ("Scheduled".to_string(), Selection::Routines, false),
             Page::Autopilot => ("Autopilot".to_string(), Selection::Autopilot, false),
+            Page::Feature(id) => {
+                let spec = self.feature_pages.iter().find(|spec| spec.id == id);
+                let title = spec.map_or(id, |spec| spec.title).to_string();
+                (title, Selection::Feature(id), false)
+            }
         };
         self.sidebar.select(selection);
         self.run_button.setHidden(!can_run);
@@ -353,7 +378,7 @@ impl ChatWindow {
             Page::Plan => self.plan.focus(&self.panel),
             Page::Slack => self.slack.focus(&self.panel),
             // Nothing to type into: the bubble itself keeps the focus.
-            Page::Activity | Page::Routines | Page::Autopilot => {}
+            Page::Activity | Page::Autopilot | Page::Feature(_) => {}
         }
     }
 
