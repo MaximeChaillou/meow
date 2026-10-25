@@ -26,7 +26,9 @@ src/
     mod.rs            the registry: `mod x;` and one entry in `all()`
     testing.rs        what feature tests share: a fake `Host`, menu helpers
     appearance/       mod.rs, tests.rs
+    agenda/           mod.rs, tests.rs
     background_check/ mod.rs, tests.rs
+    daily_actions/    mod.rs, tests.rs
     routines/         mod.rs (state, messages, `impl Feature`), page.rs, tests.rs
     update/           mod.rs, tests.rs
   ui/                 AppKit building blocks: windows, pages, widgets, menus
@@ -78,8 +80,10 @@ pub(crate) trait Feature {
 Every method but `poll` has a default, so a feature implements only what it
 uses. A feature reaches the rest of the app only through `Host`: write in a
 conversation (and flag it with `!` over the cat), post a banner, record an
-Activity item, get the Claude setup, read and change the task list (then say
-it changed), show a status in the Tasks header, read and save its settings,
+Activity item, get the Claude setup and the calendar tools, read and change
+the task list (then say it changed), show a status in the Tasks header, read
+the quick actions and their results, update a day plan's agenda, run a quick
+action, read and save its settings,
 dress the cat, size the chat bubble, have its menu items asked for again, set its
 sidebar count, ask whether the app is idle, quit. When a feature needs
 something new from the app, add one method to `Host` rather than handing out
@@ -124,33 +128,39 @@ exists to retire.
 ## Migration status
 
 Moved to `src/features/`: `update`, `routines`, `appearance` (the coat and
-the window size, from `app/coat.rs`), `background_check` (from `app/sync.rs`).
-The rest still live in
-`src/app/*.rs` as `impl App` blocks, with fields on `App`, `UiEvent` variants
-and `Controller` methods. Move them one PR each, roughly from the least to the
-most entangled:
+the window size, from `app/coat.rs`), `background_check` (from `app/sync.rs`),
+`agenda` (today's plan agenda, from `app/agenda.rs`) and `daily_actions` (from
+`app/schedule.rs`).
 
-1. `plan`, `agenda`, `rsvp`, `schedule`, `quick_actions`
-2. `tasks`, `task_actions`
-3. `slack`, split into its parts: conversations, `slack_assist`,
-   `slack_voice`, `slack_emoji`, `slack_calendar`; then `agents` and
-   `autopilot`
+**What stays in the core.** Some parts are not features but the app itself,
+shared by everything else; they stay in `src/app/`, and features reach them
+through `Host`:
 
-**Agents and Autopilot move after Slack**: the Slack panel proposes, starts
-and shows coding agents, and Autopilot reads Slack messages. Moved first, they
-would leave not-yet-moved Slack code reaching into a feature.
+- the chat: conversations and requests (`requests.rs`), quick actions
+  (`quick_actions.rs`, a quick action is a kind of conversation) and their
+  day plan page with invitation answers (`plan.rs`, `rsvp.rs`);
+- the task list and the Tasks page (`task_actions.rs`), which the chat, plans,
+  the background check and Slack all use;
+- Activity (`activity.rs`): six modules write to it, its items open other
+  pages, and it drives the news bubble over the cat;
+- the calendar tools found at launch (`slack_calendar.rs`'s probe), used by
+  Slack, the agenda and invitation answers.
 
-**Activity is not a feature but a core service**: six modules write to it,
-its items open other pages, and it drives the news bubble over the cat.
-Features write to it with `Host::record`; it stays in `src/app/activity.rs`.
+**Left to move**, one PR each:
+
+1. `slack`, as one feature folder with its parts in their own files:
+   conversations, the assist panel, writing style (`slack_voice`), emoji,
+   calendar events and image downloads. It needs from the core a way for
+   Activity items to open a feature's page at a given item.
+2. `agents` and `autopilot`, which depend on Slack: the Slack panel proposes,
+   starts and shows coding agents, and Autopilot reads Slack messages. Moved
+   first, they would leave not-yet-moved Slack code reaching into a feature.
+   Features that react to another's events need a small signal between them
+   (e.g. a new Slack message for Autopilot), passed through the core.
 
 `settings::Settings` keeps only the fields of code not moved yet
 (`write_as_me` for Slack, `autopilot`); each moves into its feature's own
 struct with it.
-
-Still to build, with the first feature that needs it: a way for a feature to
-open another page (for `autopilot`'s links). Once the app's own pages move
-too, `Page` and `Selection` keep only `Feature`.
 
 ## Module map (library and not yet moved code)
 

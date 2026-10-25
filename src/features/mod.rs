@@ -2,8 +2,10 @@
 //! feature adds its folder plus one `mod` line and one entry in `all`, kept in
 //! alphabetical order so parallel branches rarely touch the same lines.
 
+mod agenda;
 mod appearance;
 mod background_check;
+mod daily_actions;
 mod routines;
 #[cfg(test)]
 mod testing;
@@ -20,8 +22,10 @@ use crate::app::feature::Feature;
 #[rustfmt::skip]
 pub(crate) fn all(settings: &mut Store) -> Vec<Box<dyn Feature>> {
     vec![
+        Box::new(agenda::AgendaRefresh::from_env()),
         Box::new(appearance::Theme::from_settings(settings.get())),
         Box::new(background_check::BackgroundCheck::from_env()),
+        Box::new(daily_actions::DailyActions::new()),
         Box::new(routines::ScheduledTasks::from_env()),
         Box::new(update::Update::from_env()),
     ]
