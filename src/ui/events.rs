@@ -68,16 +68,8 @@ pub enum UiEvent {
     /// Dismiss the activity item in this row.
     DismissActivity(usize),
     ClearActivity,
-    /// Open a feature's page (a sidebar row of `Page::Feature`).
+    /// Open a feature's page (a sidebar row of `Page::Feature`, a menu item).
     ShowPage(crate::ui::sidebar::Page),
-    /// Open the Autopilot page.
-    ShowAutopilot,
-    /// A control of the Autopilot page.
-    Autopilot(crate::ui::autopilot_page::AutopilotAction),
-    /// Open the Slack page.
-    ShowSlack,
-    /// A control of the Slack page.
-    Slack(crate::ui::slack_page::SlackAction),
     Submit,
     Escape,
     /// The bubble stopped being the focused window.

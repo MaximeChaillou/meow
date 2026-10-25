@@ -1,21 +1,14 @@
 //! Ties the cat, the chat bubble, the hotkey and Claude runs together.
 
 mod activity;
-mod agents;
-mod autopilot;
+pub(crate) mod agents;
 mod calendar;
-mod downloads;
 pub(crate) mod feature;
 pub(crate) mod mailbox;
 mod plan;
 mod quick_actions;
 mod requests;
 mod rsvp;
-mod slack;
-mod slack_assist;
-mod slack_calendar;
-mod slack_emoji;
-mod slack_voice;
 mod snapshot;
 mod task_actions;
 
@@ -35,7 +28,7 @@ use meow::actions::{self, QuickAction};
 use meow::behavior::{Bounds, Cat, Inputs, PropView, Rng};
 use meow::claude::ClaudeEnv;
 use meow::conversations::{ChatId, Conversation, Conversations};
-use meow::settings::{self, Settings, Store};
+use meow::settings::{self, Store};
 use meow::source::Icons;
 use meow::sprites::{Coat, Facing, Look, render, render_prop};
 use meow::tasks::{self, TaskList};
@@ -98,8 +91,6 @@ struct App {
     action_results: ActionResults,
     /// Where action results are saved; `None` when the file could not be read.
     results_path: Option<PathBuf>,
-    /// The settings the app itself owns, read from `store`.
-    settings: Settings,
     /// The settings file, shared with the features.
     store: Store,
     /// The cat's right-click menu.
@@ -120,15 +111,8 @@ struct App {
     /// Requests in flight, one at most per conversation.
     runs: HashMap<ChatId, ActiveRun>,
     actions: Vec<QuickAction>,
-    /// The live Slack connection and conversation state.
-    slack: slack::SlackState,
-    /// The private Claude question about the open Slack conversation.
-    slack_assist: slack_assist::SlackAssist,
-    /// The workspace's custom emoji, and their images once downloaded.
-    emoji: slack_emoji::EmojiState,
-    /// The user's learned writing style, for Slack drafts.
-    voice: slack_voice::VoiceState,
-    /// The calendar tools of the user's Claude Code, for events from Slack.
+    /// The calendar tools of the user's Claude Code, for Slack's events, the
+    /// agenda and invitation answers.
     calendar: calendar::CalendarState,
     /// Invitation answers on their way to the calendar.
     rsvp: rsvp::RsvpState,
@@ -136,8 +120,6 @@ struct App {
     activity: activity::ActivityState,
     /// Coding agents started in Superset from the chat or Slack.
     agents: agents::AgentsState,
-    /// Work started from Slack messages, waiting for approval.
-    autopilot: autopilot::AutopilotState,
     /// The features moved to `src/features/` (see ARCHITECTURE.md).
     features: Vec<Box<dyn feature::Feature>>,
     /// A reply arrived out of sight; the cat shows `!` until it is seen.
@@ -158,20 +140,15 @@ pub fn start(mtm: MainThreadMarker) {
         .unwrap_or_default();
     let controller = Controller::new(mtm);
     let (actions, actions_error) = load_actions();
-    let (mut store, load_error) = load_settings();
-    let (settings, read_error) = match store.get::<Settings>() {
-        Ok(settings) => (settings, None),
-        Err(error) => (Settings::default(), Some(unsaved(&error))),
-    };
-    let settings_error = load_error.or(read_error);
+    let (mut store, settings_error) = load_settings();
     let mut features = crate::features::all(&mut store);
     menus::install_main_menu(mtm, &controller);
     let cat_menu = menus::cat_menu(mtm);
     let cat_window = CatWindow::new(mtm, &cat_menu);
     let prop_window = CatWindow::prop(mtm);
-    let pages: Vec<_> = features.iter().filter_map(|f| f.page()).collect();
+    let pages: Vec<_> = features.iter().flat_map(|f| f.pages()).collect();
     let chat = ChatWindow::new(mtm, &controller, &actions, &pages);
-    feature::attach_pages(mtm, &mut features, &chat);
+    feature::attach_pages(mtm, &controller, &mut features, &chat);
 
     let mut main = Transcript::default();
     let (hotkeys, hotkey_error) = match register_hotkey() {
@@ -185,13 +162,10 @@ pub fn start(mtm: MainThreadMarker) {
     let (action_results, results_path, results_error) =
         quick_actions::load_action_results(&actions);
     let (activity_state, activity_error) = activity::ActivityState::load();
-    let (autopilot_state, autopilot_error) = autopilot::AutopilotState::load();
-    chat.render_autopilot(&autopilot_state.jobs, settings.autopilot, now_secs());
     chat.render_activity(&activity_state.log, now_secs());
     crate::ui::notify::request_permission();
     let startup_errors = [
         &activity_error,
-        &autopilot_error,
         &fonts_error,
         &actions_error,
         &hotkey_error,
@@ -246,7 +220,6 @@ pub fn start(mtm: MainThreadMarker) {
         tasks_path,
         action_results,
         results_path,
-        settings,
         store,
         cat_menu,
         menu_changed: false,
@@ -265,15 +238,10 @@ pub fn start(mtm: MainThreadMarker) {
         discovery: Some(discovery),
         runs: HashMap::new(),
         actions,
-        slack: slack::SlackState::new(),
-        slack_assist: slack_assist::SlackAssist::default(),
-        voice: slack_voice::VoiceState::load(),
-        emoji: slack_emoji::EmojiState::default(),
         calendar: calendar::CalendarState::default(),
         rsvp: rsvp::RsvpState::default(),
         activity: activity_state,
         agents: agents::AgentsState::default(),
-        autopilot: autopilot_state,
         features,
         snapshot: snapshot::Snapshot::from_env(),
         _hotkeys: hotkeys,
@@ -402,16 +370,10 @@ impl App {
         }
         self.poll_discovery();
         self.poll_claude();
-        self.poll_slack();
-        self.poll_emoji();
-        self.animate_slack();
-        self.poll_slack_assist();
-        self.poll_voice();
         self.poll_calendar_probe();
         self.poll_pending_done();
         self.poll_rsvp();
         self.poll_agents();
-        self.poll_autopilot();
         self.poll_snapshot();
         self.poll_features();
         self.animate(dt);
@@ -595,15 +557,11 @@ impl App {
             }
             UiEvent::OpenTask(row) => self.open_task(row),
             UiEvent::ChatAboutTask(row) => self.chat_about_task(row),
-            UiEvent::ShowSlack => self.show_slack(),
             UiEvent::ShowActivity => self.show_activity(),
             UiEvent::OpenActivity(row) => self.open_activity(row),
             UiEvent::DismissActivity(row) => self.dismiss_activity(row),
             UiEvent::ClearActivity => self.clear_activity(),
             UiEvent::ShowPage(page) => self.open_page(page),
-            UiEvent::ShowAutopilot => self.show_autopilot(),
-            UiEvent::Autopilot(action) => self.autopilot_action(action),
-            UiEvent::Slack(action) => self.slack_action(action),
             UiEvent::AskPlan => self.ask_about_plan(),
             UiEvent::TogglePlanItem(row) => self.toggle_plan_item(row),
             UiEvent::OpenPlanItem(row) => self.open_plan_item(row),
@@ -625,15 +583,11 @@ impl App {
                 let id = self.conversations.active().clone();
                 self.cancel_run(&id)
             }
-            UiEvent::Escape if self.chat.page() == Page::Slack && self.slack_assist_shown() => {
-                self.close_slack_assist()
+            UiEvent::Escape => {
+                if !self.features_escape() {
+                    self.chat.hide();
+                }
             }
-            UiEvent::Escape
-                if self.chat.page() == Page::Slack && self.chat.slack().in_conversation() =>
-            {
-                self.slack_back()
-            }
-            UiEvent::Escape => self.chat.hide(),
             // Checked on the next tick: focus may already be back (e.g. a sheet closed).
             UiEvent::FocusLost if !self.chat.is_key() => self.chat.hide(),
             UiEvent::FocusLost => {}
@@ -644,7 +598,7 @@ impl App {
 
     fn quit(&mut self) {
         pointer::release();
-        self.slack.save_cache();
+        self.features_quit();
         NSApplication::sharedApplication(self.mtm).terminate(None);
     }
 

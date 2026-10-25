@@ -38,6 +38,9 @@ const MAX_DETAIL_CHARS: usize = 700;
 /// Held actions are named `job row * TAG_STRIDE + action index`.
 pub const TAG_STRIDE: usize = 1000;
 
+/// The Autopilot page's id among the features' pages.
+pub const PAGE_ID: &str = "autopilot";
+
 /// What the Autopilot page's controls ask for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AutopilotAction {

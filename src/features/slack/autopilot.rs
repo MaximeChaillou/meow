@@ -14,15 +14,14 @@ use meow::activity::{Kind, Link, Note};
 use meow::autopilot::{self, ActionState, Folder, Job, Jobs, Origin, Stage};
 use meow::claude::{ClaudeEvent, Run, STRONG_MODEL};
 use meow::guard::{self, Call};
-use meow::settings::Settings;
 use meow::slack::model::Message;
 use meow::source::Source;
 use meow::worktree::{self, Tools};
 
-use crate::ui::autopilot_page::{AutopilotAction, TAG_STRIDE};
-use crate::ui::sidebar::Page;
+use crate::ui::autopilot_page::{self, AutopilotAction, TAG_STRIDE};
 
-use super::{App, now_secs};
+use super::{Slack, SlackSettings, now_secs};
+use crate::app::feature::Host;
 
 /// A conversation is triaged once quiet this long, so a request written in
 /// several messages is read whole.
@@ -95,20 +94,34 @@ impl AutopilotState {
         }
     }
 
+    /// No jobs and no file, for tests.
+    #[cfg(test)]
+    pub(super) fn empty() -> Self {
+        Self {
+            jobs: Jobs::default(),
+            path: None,
+            waiting: Vec::new(),
+            triage: None,
+            preparing: None,
+            active: None,
+            next_poll: Instant::now(),
+        }
+    }
+
     /// The job being worked on or prepared.
     fn busy(&self) -> bool {
         self.active.is_some() || self.preparing.is_some()
     }
 }
 
-impl App {
+impl Slack {
     /// A control of the Autopilot page.
-    pub(super) fn autopilot_action(&mut self, action: AutopilotAction) {
+    pub(super) fn autopilot_action(&mut self, action: AutopilotAction, host: &mut dyn Host) {
         match action {
-            AutopilotAction::Toggle => self.toggle_autopilot(),
-            AutopilotAction::Approve(tag) => self.decide_autopilot(tag, true),
-            AutopilotAction::Reject(tag) => self.decide_autopilot(tag, false),
-            AutopilotAction::Dismiss(row) => self.dismiss_autopilot(row),
+            AutopilotAction::Toggle => self.toggle_autopilot(host),
+            AutopilotAction::Approve(tag) => self.decide_autopilot(tag, true, host),
+            AutopilotAction::Reject(tag) => self.decide_autopilot(tag, false, host),
+            AutopilotAction::Dismiss(row) => self.dismiss_autopilot(row, host),
             AutopilotAction::OpenFolder(row) => self.open_autopilot_folder(row),
         }
     }
@@ -130,16 +143,16 @@ impl App {
         });
     }
 
-    pub(super) fn poll_autopilot(&mut self) {
-        self.collect_triage();
-        self.collect_preparing();
-        self.collect_autopilot_run();
+    pub(super) fn poll_autopilot(&mut self, host: &mut dyn Host) {
+        self.collect_triage(host);
+        self.collect_preparing(host);
+        self.collect_autopilot_run(host);
         if Instant::now() < self.autopilot.next_poll {
             return;
         }
         self.autopilot.next_poll = Instant::now() + POLL_EVERY;
-        self.start_triage();
-        self.start_next_job();
+        self.start_triage(host);
+        self.start_next_job(host);
     }
 
     /// The user's name, as the prompts call them.
@@ -150,7 +163,7 @@ impl App {
         }
     }
 
-    fn start_triage(&mut self) {
+    fn start_triage(&mut self, host: &mut dyn Host) {
         if self.autopilot.triage.is_some() {
             return;
         }
@@ -162,7 +175,7 @@ impl App {
         if self.answered_since(&waiting) {
             return;
         }
-        let Some(Ok(env)) = &self.claude else {
+        let Some(env) = host.claude() else {
             return;
         };
         let prompt = autopilot::triage_prompt(
@@ -212,7 +225,7 @@ impl App {
             .join("\n")
     }
 
-    fn collect_triage(&mut self) {
+    fn collect_triage(&mut self, host: &mut dyn Host) {
         let outcome = loop {
             let Some((run, _)) = &self.autopilot.triage else {
                 return;
@@ -242,31 +255,31 @@ impl App {
             text: self.slack.text_of(&waiting.message),
         };
         self.autopilot.jobs.add(plan, origin, now_secs());
-        self.autopilot_changed();
+        self.autopilot_changed(host);
     }
 
     /// Starts what comes next: an approved action first, else the oldest queued job.
-    fn start_next_job(&mut self) {
+    fn start_next_job(&mut self, host: &mut dyn Host) {
         if self.autopilot.busy() {
             return;
         }
         if let Some((id, index)) = self.autopilot.jobs.next_approved() {
-            return self.start_approval(id, index);
+            return self.start_approval(id, index, host);
         }
         let Some(job) = self.autopilot.jobs.next_queued().cloned() else {
             return;
         };
         let wants_code = job.repo.is_some() || job.pr.is_some();
         if wants_code && job.folder.is_none() {
-            self.prepare_folder(&job);
+            self.prepare_folder(&job, host);
         } else {
-            self.start_work(job.id);
+            self.start_work(job.id, host);
         }
     }
 
     /// Makes the job's worktree in the background; the work starts once it is there.
-    fn prepare_folder(&mut self, job: &Job) {
-        let (Some(Ok(env)), Some(dir)) = (&self.claude, autopilot::job_dir(job.id)) else {
+    fn prepare_folder(&mut self, job: &Job, host: &mut dyn Host) {
+        let (Some(env), Some(dir)) = (host.claude(), autopilot::job_dir(job.id)) else {
             return;
         };
         let tools = Tools {
@@ -285,10 +298,10 @@ impl App {
             job.stage = Stage::Preparing;
         }
         self.autopilot.preparing = Some((job.id, rx));
-        self.autopilot_changed();
+        self.autopilot_changed(host);
     }
 
-    fn collect_preparing(&mut self) {
+    fn collect_preparing(&mut self, host: &mut dyn Host) {
         let Some((id, rx)) = &self.autopilot.preparing else {
             return;
         };
@@ -304,9 +317,9 @@ impl App {
                 if let Some(job) = self.autopilot.jobs.get_mut(id) {
                     job.folder = Some(folder);
                 }
-                self.start_work(id);
+                self.start_work(id, host);
             }
-            Err(error) => self.job_ended(id, Err(error)),
+            Err(error) => self.job_ended(id, Err(error), host),
         }
     }
 
@@ -317,11 +330,11 @@ impl App {
         Some((dir.join("held.jsonl"), cwd))
     }
 
-    fn start_work(&mut self, id: u64) {
+    fn start_work(&mut self, id: u64, host: &mut dyn Host) {
         let Some(job) = self.autopilot.jobs.get(id).cloned() else {
             return;
         };
-        let Some(Ok(env)) = &self.claude else {
+        let Some(env) = host.claude() else {
             return;
         };
         let Some((held, cwd)) = self.job_paths(&job) else {
@@ -345,30 +358,31 @@ impl App {
                 if let Some(job) = self.autopilot.jobs.get_mut(id) {
                     job.stage = Stage::Working;
                 }
-                self.autopilot_changed();
+                self.autopilot_changed(host);
             }
-            Err(error) => self.job_ended(id, Err(error)),
+            Err(error) => self.job_ended(id, Err(error), host),
         }
     }
 
     /// Resumes job `id`'s session to make its approved action `index`.
-    fn start_approval(&mut self, id: u64, index: usize) {
+    fn start_approval(&mut self, id: u64, index: usize, host: &mut dyn Host) {
         let Some(job) = self.autopilot.jobs.get(id).cloned() else {
             return;
         };
-        let fail = |app: &mut Self, reason: &str| {
+        let fail = |app: &mut Self, host: &mut dyn Host, reason: &str| {
             app.autopilot
                 .jobs
                 .set_action(id, index, ActionState::Failed, Some(reason.to_string()));
-            app.autopilot_changed();
+            app.autopilot_changed(host);
         };
         let (Some(session), Some(action)) = (&job.session, job.actions.get(index)) else {
             return fail(
                 self,
+                host,
                 "The work's Claude session is unknown, so it cannot be resumed.",
             );
         };
-        let Some(Ok(env)) = &self.claude else {
+        let Some(env) = host.claude() else {
             return;
         };
         let (Some((held, cwd)), Some(dir)) = (self.job_paths(&job), autopilot::job_dir(id)) else {
@@ -379,7 +393,11 @@ impl App {
             .map_err(|e| e.to_string())
             .and_then(|json| std::fs::write(&approved, json).map_err(|e| e.to_string()));
         if let Err(error) = written {
-            return fail(self, &format!("Could not write the approval: {error}"));
+            return fail(
+                self,
+                host,
+                &format!("Could not write the approval: {error}"),
+            );
         }
         let prompt = autopilot::approve_prompt(&action.call, &self.me());
         let model = env.model.clone();
@@ -402,13 +420,13 @@ impl App {
                 self.autopilot
                     .jobs
                     .set_action(id, index, ActionState::Running, None);
-                self.autopilot_changed();
+                self.autopilot_changed(host);
             }
-            Err(error) => fail(self, &error),
+            Err(error) => fail(self, host, &error),
         }
     }
 
-    fn collect_autopilot_run(&mut self) {
+    fn collect_autopilot_run(&mut self, host: &mut dyn Host) {
         let outcome = loop {
             let Some(active) = &mut self.autopilot.active else {
                 return;
@@ -439,8 +457,8 @@ impl App {
             job.session = active.session.or(job.session.take());
         }
         match active.step {
-            Step::Work => self.job_ended(active.job, outcome),
-            Step::Approve(index) => self.approval_ended(active.job, index, outcome),
+            Step::Work => self.job_ended(active.job, outcome, host),
+            Step::Approve(index) => self.approval_ended(active.job, index, outcome, host),
         }
     }
 
@@ -455,7 +473,7 @@ impl App {
     }
 
     /// The work of job `id` ended: its held calls now wait for the user.
-    fn job_ended(&mut self, id: u64, outcome: Result<String, String>) {
+    fn job_ended(&mut self, id: u64, outcome: Result<String, String>, host: &mut dyn Host) {
         let held = self.take_held(id);
         self.autopilot.jobs.finish(id, outcome, held, now_secs());
         let Some(job) = self.autopilot.jobs.get(id).cloned() else {
@@ -481,7 +499,7 @@ impl App {
         } else {
             vec![Source::Slack]
         };
-        self.notify(Note {
+        host.record(Note {
             kind: Kind::Autopilot,
             title,
             detail,
@@ -489,11 +507,17 @@ impl App {
             sources,
             key: Some(format!("autopilot:{id}")),
         });
-        self.autopilot_changed();
+        self.autopilot_changed(host);
     }
 
     /// The run making approved action `index` of job `id` ended.
-    fn approval_ended(&mut self, id: u64, index: usize, outcome: Result<String, String>) {
+    fn approval_ended(
+        &mut self,
+        id: u64,
+        index: usize,
+        outcome: Result<String, String>,
+        host: &mut dyn Host,
+    ) {
         let approved = autopilot::job_dir(id).map(|dir| dir.join("approved.json"));
         // The guard removes the approval once the call went through.
         let unused = approved.as_ref().is_some_and(|path| path.exists());
@@ -513,35 +537,27 @@ impl App {
             .set_action(id, index, state, Some(result));
         let held = self.take_held(id);
         self.autopilot.jobs.hold(id, held);
-        self.autopilot_changed();
+        self.autopilot_changed(host);
     }
 
-    pub(super) fn show_autopilot(&mut self) {
-        if !self.chat.is_visible() {
-            self.open_window();
-        }
-        self.render_autopilot();
-        self.chat.show_page(Page::Autopilot);
-    }
-
-    pub(super) fn toggle_autopilot(&mut self) {
-        self.settings = Settings {
+    pub(super) fn toggle_autopilot(&mut self, host: &mut dyn Host) {
+        self.settings = SlackSettings {
             autopilot: !self.settings.autopilot,
             ..self.settings.clone()
         };
         if !self.settings.autopilot {
             self.autopilot.waiting.clear();
         }
-        if let Err(error) = self.store.set(&self.settings) {
+        if let Err(error) = host.settings().set(&self.settings) {
             eprintln!("meow: {error}");
         }
-        self.render_autopilot();
+        self.render_autopilot(host);
     }
 
     /// Approves (or rejects) the action a button's `tag` points at.
-    pub(super) fn decide_autopilot(&mut self, tag: usize, approve: bool) {
+    pub(super) fn decide_autopilot(&mut self, tag: usize, approve: bool, host: &mut dyn Host) {
         let (row, index) = (tag / TAG_STRIDE, tag % TAG_STRIDE);
-        let Some(id) = self.chat.autopilot().id_at(row) else {
+        let Some(id) = self.autopilot_page().id_at(row) else {
             return;
         };
         let pending = self
@@ -559,12 +575,12 @@ impl App {
             ActionState::Rejected
         };
         self.autopilot.jobs.set_action(id, index, state, None);
-        self.autopilot_changed();
+        self.autopilot_changed(host);
     }
 
     /// Removes the job in `row`, stopping its run and deleting its worktree.
-    pub(super) fn dismiss_autopilot(&mut self, row: usize) {
-        let Some(id) = self.chat.autopilot().id_at(row) else {
+    pub(super) fn dismiss_autopilot(&mut self, row: usize, host: &mut dyn Host) {
+        let Some(id) = self.autopilot_page().id_at(row) else {
             return;
         };
         // Dropping the run stops it.
@@ -582,13 +598,12 @@ impl App {
         if let Some(job) = self.autopilot.jobs.remove(id) {
             remove_folders(vec![job]);
         }
-        self.autopilot_changed();
+        self.autopilot_changed(host);
     }
 
     pub(super) fn open_autopilot_folder(&self, row: usize) {
         let folder = self
-            .chat
-            .autopilot()
+            .autopilot_page()
             .id_at(row)
             .and_then(|id| self.autopilot.jobs.get(id))
             .and_then(|job| job.folder.as_ref());
@@ -597,19 +612,22 @@ impl App {
         }
     }
 
-    fn autopilot_changed(&mut self) {
+    fn autopilot_changed(&mut self, host: &mut dyn Host) {
         remove_folders(self.autopilot.jobs.prune(now_secs()));
         if let Some(path) = &self.autopilot.path
             && let Err(error) = self.autopilot.jobs.save(path)
         {
             eprintln!("meow: {error}");
         }
-        self.render_autopilot();
+        self.render_autopilot(host);
     }
 
-    pub(super) fn render_autopilot(&self) {
-        self.chat
-            .render_autopilot(&self.autopilot.jobs, self.settings.autopilot, now_secs());
+    /// Redraws the Autopilot page, and the count of jobs waiting in the sidebar.
+    pub(super) fn render_autopilot(&self, host: &mut dyn Host) {
+        let jobs = &self.autopilot.jobs;
+        self.autopilot_page()
+            .render(jobs, self.settings.autopilot, now_secs());
+        host.set_badge(autopilot_page::PAGE_ID, jobs.waiting_count());
     }
 }
 

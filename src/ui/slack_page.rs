@@ -10,6 +10,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::time::Instant;
 
+use objc2::Message;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{AllocAnyThread, MainThreadMarker, MainThreadOnly};
@@ -21,7 +22,7 @@ use objc2_foundation::{
     NSAttributedString, NSMutableAttributedString, NSPoint, NSRange, NSRect, NSSize, NSString,
 };
 
-use super::action::{Action, ActionSink};
+use super::action::{Action, ActionSink, LinkDelegate};
 use super::bubble;
 use super::controller::Controller;
 use super::emoji_text::{self, Animated, EmojiGlyph, ImageGlyph};
@@ -58,6 +59,9 @@ const BACK_TO_LIST: &str = "‹ Messages";
 const BACK_TO_CONVERSATION: &str = "‹ Back";
 const REPLY_HINT: &str = "Reply, or ask Claude… (Esc: back)";
 const THREAD_REPLY_HINT: &str = "Reply in thread, or ask Claude… (Esc: back)";
+
+/// The Slack page's id among the features' pages.
+pub const PAGE_ID: &str = "slack";
 
 /// What the Slack page's controls ask for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,6 +176,9 @@ pub struct SlackPage {
     tab: Cell<SlackTab>,
     /// The targets of the page's fixed controls, kept for them.
     _actions: ActionSink<SlackAction>,
+    /// Opens threads from the transcript's reply counts; kept, as the
+    /// transcript holds its delegate weakly.
+    _links: Retained<LinkDelegate>,
     /// The targets of the list's tabs and rows, dropped as they are redrawn.
     row_actions: ActionSink<SlackAction>,
     mtm: MainThreadMarker,
@@ -411,7 +418,15 @@ impl SlackPage {
         transcript.setDrawsBackground(false);
         transcript.setTextContainerInset(NSSize::new(4.0, 6.0));
         rich_text::style_links(&transcript);
-        transcript.setDelegate(Some(ProtocolObject::from_ref(&**controller)));
+        let open_thread = actions.sender();
+        let links = LinkDelegate::new(mtm, move |url| match rich_text::thread_index(url) {
+            Some(index) => {
+                open_thread(SlackAction::OpenThread(index));
+                true
+            }
+            None => false,
+        });
+        transcript.setDelegate(Some(ProtocolObject::from_ref(&*links)));
         view.addSubview(&convo_scroll);
         input.keep_clear(&convo_scroll);
 
@@ -440,15 +455,23 @@ impl SlackPage {
             tab: Cell::new(SlackTab::Direct),
             row_actions: actions.sibling(),
             _actions: actions,
+            _links: links,
             mtm,
         };
         page.show_signed_out(None);
         page
     }
 
-    pub fn focus(&self, window: &NSWindow) {
-        if !self.input.isHidden() {
-            window.makeFirstResponder(Some(&self.input));
+    /// The reply box, to put the cursor in when the page shows.
+    pub fn input_view(&self) -> Retained<NSView> {
+        let field: &NSView = &self.input;
+        field.retain()
+    }
+
+    /// Puts `text` in the reply box and focuses it.
+    pub fn put_draft(&self, text: &str) {
+        if let Some(window) = self.view.window() {
+            self.set_input(text, &window);
         }
     }
 

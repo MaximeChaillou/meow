@@ -11,7 +11,8 @@ use objc2_foundation::{NSNotification, NSString};
 
 use super::events::{UiEvent, push};
 use super::rich_text;
-use super::slack_page::SlackAction;
+use super::sidebar::Page;
+use super::{autopilot_page, slack_page};
 
 define_class!(
     #[unsafe(super(NSObject))]
@@ -75,7 +76,7 @@ define_class!(
 
         #[unsafe(method(showSlack:))]
         fn show_slack(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::ShowSlack);
+            push(UiEvent::ShowPage(Page::Feature(slack_page::PAGE_ID)));
         }
 
         #[unsafe(method(addTask:))]
@@ -177,7 +178,7 @@ define_class!(
 
         #[unsafe(method(showAutopilot:))]
         fn show_autopilot(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::ShowAutopilot);
+            push(UiEvent::ShowPage(Page::Feature(autopilot_page::PAGE_ID)));
         }
 
         #[unsafe(method(acceptPlanEvent:))]
@@ -241,19 +242,14 @@ define_class!(
     }
 
     unsafe impl NSTextViewDelegate for Controller {
-        /// Clicks on a reply's "N steps" line fold or unfold it, and on a Slack
-        /// message's reply count open its thread; other links open normally.
+        /// Clicks on a reply's "N steps" line fold or unfold it; other links
+        /// open normally.
         #[unsafe(method(textView:clickedOnLink:atIndex:))]
         fn clicked_on_link(&self, _view: &NSTextView, link: &AnyObject, _index: usize) -> Bool {
             // SAFETY: links are NSURL or NSString, and both describe themselves as the URL text.
             let url: Retained<NSString> = unsafe { msg_send![link, description] };
             let url = url.to_string();
-            let event = rich_text::steps_turn(&url)
-                .map(UiEvent::ToggleSteps)
-                .or_else(|| {
-                    rich_text::thread_index(&url)
-                        .map(|index| UiEvent::Slack(SlackAction::OpenThread(index)))
-                });
+            let event = rich_text::steps_turn(&url).map(UiEvent::ToggleSteps);
             match event {
                 Some(event) => {
                     push(event);

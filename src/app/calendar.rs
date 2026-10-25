@@ -35,7 +35,7 @@ impl App {
             return;
         }
         if self.calendar.probe.is_none() {
-            let Ok(env) = self.claude_env() else {
+            let Some(Ok(env)) = &self.claude else {
                 return;
             };
             // No tools allowed: the run only has to start and list them.
