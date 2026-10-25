@@ -11,6 +11,7 @@ use objc2_foundation::{NSNotification, NSString};
 
 use super::events::{UiEvent, push};
 use super::rich_text;
+use super::slack_page::SlackAction;
 
 define_class!(
     #[unsafe(super(NSObject))]
@@ -75,84 +76,6 @@ define_class!(
         #[unsafe(method(showSlack:))]
         fn show_slack(&self, _sender: Option<&AnyObject>) {
             push(UiEvent::ShowSlack);
-        }
-
-        #[unsafe(method(signInSlack:))]
-        fn sign_in_slack(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::SignInSlack);
-        }
-
-        /// Slack conversation rows: the sender's tag is the row index.
-        #[unsafe(method(showSlackDirect:))]
-        fn show_slack_direct(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::SlackTab(super::slack_page::SlackTab::Direct));
-        }
-
-        #[unsafe(method(showSlackChannels:))]
-        fn show_slack_channels(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::SlackTab(super::slack_page::SlackTab::Channels));
-        }
-
-        #[unsafe(method(openSlack:))]
-        fn open_slack(&self, sender: Option<&AnyObject>) {
-            if let Some(row) = sender_tag(sender) {
-                push(UiEvent::OpenSlackConversation(row));
-            }
-        }
-
-        #[unsafe(method(slackBack:))]
-        fn slack_back(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::SlackBack);
-        }
-
-        #[unsafe(method(sendSlack:))]
-        fn send_slack(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::SendSlack);
-        }
-
-        #[unsafe(method(askSlack:))]
-        fn ask_slack(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::AskSlack);
-        }
-
-        #[unsafe(method(autocompleteSlack:))]
-        fn autocomplete_slack(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::AutocompleteSlack);
-        }
-
-        #[unsafe(method(toggleWriteAsMe:))]
-        fn toggle_write_as_me(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::ToggleWriteAsMe);
-        }
-
-        #[unsafe(method(learnMyStyle:))]
-        fn learn_my_style(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::LearnMyStyle);
-        }
-
-        #[unsafe(method(useSlackDraft:))]
-        fn use_slack_draft(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::UseSlackDraft);
-        }
-
-        #[unsafe(method(createSlackEvent:))]
-        fn create_slack_event(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::CreateSlackEvent);
-        }
-
-        #[unsafe(method(closeSlackAssist:))]
-        fn close_slack_assist(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::CloseSlackAssist);
-        }
-
-        #[unsafe(method(agentSlack:))]
-        fn agent_slack(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::AgentSlack);
-        }
-
-        #[unsafe(method(startSlackAgent:))]
-        fn start_slack_agent(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::StartSlackAgent);
         }
 
         #[unsafe(method(addTask:))]
@@ -257,39 +180,6 @@ define_class!(
             push(UiEvent::ShowAutopilot);
         }
 
-        #[unsafe(method(toggleAutopilot:))]
-        fn toggle_autopilot(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::ToggleAutopilot);
-        }
-
-        #[unsafe(method(approveAutopilot:))]
-        fn approve_autopilot(&self, sender: Option<&AnyObject>) {
-            if let Some(tag) = sender_tag(sender) {
-                push(UiEvent::ApproveAutopilot(tag));
-            }
-        }
-
-        #[unsafe(method(rejectAutopilot:))]
-        fn reject_autopilot(&self, sender: Option<&AnyObject>) {
-            if let Some(tag) = sender_tag(sender) {
-                push(UiEvent::RejectAutopilot(tag));
-            }
-        }
-
-        #[unsafe(method(dismissAutopilot:))]
-        fn dismiss_autopilot(&self, sender: Option<&AnyObject>) {
-            if let Some(row) = sender_tag(sender) {
-                push(UiEvent::DismissAutopilot(row));
-            }
-        }
-
-        #[unsafe(method(openAutopilotFolder:))]
-        fn open_autopilot_folder(&self, sender: Option<&AnyObject>) {
-            if let Some(row) = sender_tag(sender) {
-                push(UiEvent::OpenAutopilotFolder(row));
-            }
-        }
-
         #[unsafe(method(acceptPlanEvent:))]
         fn accept_plan_event(&self, sender: Option<&AnyObject>) {
             if let Some(index) = sender_tag(sender) {
@@ -360,7 +250,10 @@ define_class!(
             let url = url.to_string();
             let event = rich_text::steps_turn(&url)
                 .map(UiEvent::ToggleSteps)
-                .or_else(|| rich_text::thread_index(&url).map(UiEvent::OpenSlackThread));
+                .or_else(|| {
+                    rich_text::thread_index(&url)
+                        .map(|index| UiEvent::Slack(SlackAction::OpenThread(index)))
+                });
             match event {
                 Some(event) => {
                     push(event);

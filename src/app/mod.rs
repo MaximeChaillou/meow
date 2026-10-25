@@ -3,6 +3,7 @@
 mod activity;
 mod agents;
 mod autopilot;
+mod calendar;
 mod downloads;
 pub(crate) mod feature;
 pub(crate) mod mailbox;
@@ -128,7 +129,7 @@ struct App {
     /// The user's learned writing style, for Slack drafts.
     voice: slack_voice::VoiceState,
     /// The calendar tools of the user's Claude Code, for events from Slack.
-    calendar: slack_calendar::CalendarState,
+    calendar: calendar::CalendarState,
     /// Invitation answers on their way to the calendar.
     rsvp: rsvp::RsvpState,
     /// What happened in the background, for the Activity page.
@@ -268,7 +269,7 @@ pub fn start(mtm: MainThreadMarker) {
         slack_assist: slack_assist::SlackAssist::default(),
         voice: slack_voice::VoiceState::load(),
         emoji: slack_emoji::EmojiState::default(),
-        calendar: slack_calendar::CalendarState::default(),
+        calendar: calendar::CalendarState::default(),
         rsvp: rsvp::RsvpState::default(),
         activity: activity_state,
         agents: agents::AgentsState::default(),
@@ -595,32 +596,14 @@ impl App {
             UiEvent::OpenTask(row) => self.open_task(row),
             UiEvent::ChatAboutTask(row) => self.chat_about_task(row),
             UiEvent::ShowSlack => self.show_slack(),
-            UiEvent::SlackTab(tab) => self.show_slack_tab(tab),
             UiEvent::ShowActivity => self.show_activity(),
             UiEvent::OpenActivity(row) => self.open_activity(row),
             UiEvent::DismissActivity(row) => self.dismiss_activity(row),
             UiEvent::ClearActivity => self.clear_activity(),
             UiEvent::ShowPage(page) => self.open_page(page),
             UiEvent::ShowAutopilot => self.show_autopilot(),
-            UiEvent::ToggleAutopilot => self.toggle_autopilot(),
-            UiEvent::ApproveAutopilot(tag) => self.decide_autopilot(tag, true),
-            UiEvent::RejectAutopilot(tag) => self.decide_autopilot(tag, false),
-            UiEvent::DismissAutopilot(row) => self.dismiss_autopilot(row),
-            UiEvent::OpenAutopilotFolder(row) => self.open_autopilot_folder(row),
-            UiEvent::SignInSlack => self.sign_in_slack(),
-            UiEvent::OpenSlackConversation(row) => self.open_slack_conversation(row),
-            UiEvent::OpenSlackThread(index) => self.open_slack_thread(index),
-            UiEvent::SlackBack => self.slack_back(),
-            UiEvent::SendSlack => self.send_slack(),
-            UiEvent::AskSlack => self.ask_slack(),
-            UiEvent::AutocompleteSlack => self.autocomplete_slack(),
-            UiEvent::CreateSlackEvent => self.create_slack_event(),
-            UiEvent::ToggleWriteAsMe => self.toggle_write_as_me(),
-            UiEvent::LearnMyStyle => self.learn_my_style(),
-            UiEvent::UseSlackDraft => self.use_slack_draft(),
-            UiEvent::CloseSlackAssist => self.close_slack_assist(),
-            UiEvent::AgentSlack => self.agent_slack(),
-            UiEvent::StartSlackAgent => self.start_slack_agent(),
+            UiEvent::Autopilot(action) => self.autopilot_action(action),
+            UiEvent::Slack(action) => self.slack_action(action),
             UiEvent::AskPlan => self.ask_about_plan(),
             UiEvent::TogglePlanItem(row) => self.toggle_plan_item(row),
             UiEvent::OpenPlanItem(row) => self.open_plan_item(row),
