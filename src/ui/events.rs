@@ -72,48 +72,12 @@ pub enum UiEvent {
     ShowPage(crate::ui::sidebar::Page),
     /// Open the Autopilot page.
     ShowAutopilot,
-    /// Turn Autopilot on or off.
-    ToggleAutopilot,
-    /// Approve or reject a held action: job row × `TAG_STRIDE` + action index.
-    ApproveAutopilot(usize),
-    RejectAutopilot(usize),
-    /// Remove the job in this row.
-    DismissAutopilot(usize),
-    /// Show the worktree of the job in this row.
-    OpenAutopilotFolder(usize),
+    /// A control of the Autopilot page.
+    Autopilot(crate::ui::autopilot_page::AutopilotAction),
     /// Open the Slack page.
     ShowSlack,
-    /// Start the Slack sign-in flow.
-    SignInSlack,
-    /// Open the Slack conversation in this row, as last listed.
-    OpenSlackConversation(usize),
-    /// Show the Slack list's tab of direct messages, or of channels.
-    SlackTab(crate::ui::slack_page::SlackTab),
-    /// Open the thread of the open Slack conversation's message at this index.
-    OpenSlackThread(usize),
-    /// Go back from a Slack thread to its conversation, or from a
-    /// conversation to the list.
-    SlackBack,
-    /// Send the reply typed in the open Slack conversation.
-    SendSlack,
-    /// Ask Claude, privately, about the open Slack conversation.
-    AskSlack,
-    /// Have Claude research and draft the reply, with the user's tools.
-    AutocompleteSlack,
-    /// Turn drafting in the user's own style on or off.
-    ToggleWriteAsMe,
-    /// Learn the user's style from their Slack messages.
-    LearnMyStyle,
-    /// Put Claude's draft in the Slack reply box.
-    UseSlackDraft,
-    /// Create the calendar event Claude proposed.
-    CreateSlackEvent,
-    /// Close the private Claude panel.
-    CloseSlackAssist,
-    /// Have Claude propose a coding agent for the open Slack conversation.
-    AgentSlack,
-    /// Start the coding agent Claude proposed.
-    StartSlackAgent,
+    /// A control of the Slack page.
+    Slack(crate::ui::slack_page::SlackAction),
     Submit,
     Escape,
     /// The bubble stopped being the focused window.

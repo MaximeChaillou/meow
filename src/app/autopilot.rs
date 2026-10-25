@@ -19,7 +19,7 @@ use meow::slack::model::Message;
 use meow::source::Source;
 use meow::worktree::{self, Tools};
 
-use crate::ui::autopilot_page::TAG_STRIDE;
+use crate::ui::autopilot_page::{AutopilotAction, TAG_STRIDE};
 use crate::ui::sidebar::Page;
 
 use super::{App, now_secs};
@@ -102,6 +102,17 @@ impl AutopilotState {
 }
 
 impl App {
+    /// A control of the Autopilot page.
+    pub(super) fn autopilot_action(&mut self, action: AutopilotAction) {
+        match action {
+            AutopilotAction::Toggle => self.toggle_autopilot(),
+            AutopilotAction::Approve(tag) => self.decide_autopilot(tag, true),
+            AutopilotAction::Reject(tag) => self.decide_autopilot(tag, false),
+            AutopilotAction::Dismiss(row) => self.dismiss_autopilot(row),
+            AutopilotAction::OpenFolder(row) => self.open_autopilot_folder(row),
+        }
+    }
+
     /// `message`, from `from`, is for the user: triage its conversation once quiet.
     pub(super) fn consider_for_autopilot(&mut self, channel: &str, message: &Message, from: &str) {
         if !self.settings.autopilot || self.autopilot.jobs.has_origin(channel, &message.ts) {

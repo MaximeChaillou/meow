@@ -23,6 +23,7 @@ use super::autopilot_page::AutopilotPage;
 use super::bubble::{self, BubblePanel, BubbleView};
 use super::chat_page::ChatPage;
 use super::controller::Controller;
+use super::events::{self, UiEvent};
 use super::plan_page::PlanPage;
 use super::rich_text::{self, Attributes};
 use super::screens;
@@ -110,9 +111,13 @@ impl ChatWindow {
         let chat = ChatPage::new(mtm, controller, page_frame);
         let tasks = TaskPage::new(mtm, controller, page_frame);
         let plan = PlanPage::new(mtm, controller, page_frame);
-        let slack = SlackPage::new(mtm, controller, page_frame);
+        let slack = SlackPage::new(mtm, controller, page_frame, |action| {
+            events::push(UiEvent::Slack(action))
+        });
         let activity = ActivityPage::new(mtm, controller, page_frame);
-        let autopilot = AutopilotPage::new(mtm, controller, page_frame);
+        let autopilot = AutopilotPage::new(mtm, page_frame, |action| {
+            events::push(UiEvent::Autopilot(action))
+        });
         bubble.addSubview(&chat.view);
         bubble.addSubview(&tasks.view);
         bubble.addSubview(&plan.view);
