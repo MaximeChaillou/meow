@@ -7,6 +7,7 @@ use meow::claude::ClaudeEnv;
 use meow::conversations::ChatId;
 use meow::settings::Store;
 use meow::sprites::Coat;
+use meow::tasks::TaskList;
 
 use crate::app::feature::Host;
 use crate::ui::menus::MenuEntry;
@@ -19,6 +20,11 @@ pub(crate) struct FakeHost {
     pub(crate) notes: Vec<Note>,
     pub(crate) badges: Vec<(&'static str, usize)>,
     pub(crate) settings: Store,
+    pub(crate) tasks: TaskList,
+    /// How many times the task list was said to have changed.
+    pub(crate) tasks_changes: usize,
+    /// Each status shown in the Tasks header.
+    pub(crate) tasks_status: Vec<Option<String>>,
     /// Each coat the cat was dressed in.
     pub(crate) worn: Vec<Coat>,
     /// Each size the chat bubble was given.
@@ -57,6 +63,18 @@ impl Host for FakeHost {
 
     fn settings(&mut self) -> &mut Store {
         &mut self.settings
+    }
+
+    fn tasks(&mut self) -> &mut TaskList {
+        &mut self.tasks
+    }
+
+    fn tasks_changed(&mut self) {
+        self.tasks_changes += 1;
+    }
+
+    fn set_tasks_status(&mut self, status: Option<&str>) {
+        self.tasks_status.push(status.map(str::to_string));
     }
 
     fn wear(&mut self, coat: Coat) {

@@ -3,6 +3,7 @@
 //! alphabetical order so parallel branches rarely touch the same lines.
 
 mod appearance;
+mod background_check;
 mod routines;
 #[cfg(test)]
 mod testing;
@@ -20,6 +21,7 @@ use crate::app::feature::Feature;
 pub(crate) fn all(settings: &mut Store) -> Vec<Box<dyn Feature>> {
     vec![
         Box::new(appearance::Theme::from_settings(settings.get())),
+        Box::new(background_check::BackgroundCheck::from_env()),
         Box::new(routines::ScheduledTasks::from_env()),
         Box::new(update::Update::from_env()),
     ]
