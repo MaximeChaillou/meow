@@ -1,7 +1,6 @@
 //! Ties the cat, the chat bubble, the hotkey and Claude runs together.
 
 mod activity;
-mod agenda;
 mod agents;
 mod autopilot;
 mod downloads;
@@ -11,7 +10,6 @@ mod plan;
 mod quick_actions;
 mod requests;
 mod rsvp;
-mod schedule;
 mod slack;
 mod slack_assist;
 mod slack_calendar;
@@ -131,10 +129,6 @@ struct App {
     voice: slack_voice::VoiceState,
     /// The calendar tools of the user's Claude Code, for events from Slack.
     calendar: slack_calendar::CalendarState,
-    /// Daily quick actions.
-    schedule: schedule::ScheduleState,
-    /// The refresh of today's plan agenda from the calendar.
-    agenda: agenda::AgendaState,
     /// Invitation answers on their way to the calendar.
     rsvp: rsvp::RsvpState,
     /// What happened in the background, for the Activity page.
@@ -275,8 +269,6 @@ pub fn start(mtm: MainThreadMarker) {
         voice: slack_voice::VoiceState::load(),
         emoji: slack_emoji::EmojiState::default(),
         calendar: slack_calendar::CalendarState::default(),
-        schedule: schedule::ScheduleState::new(),
-        agenda: agenda::AgendaState::from_env(),
         rsvp: rsvp::RsvpState::default(),
         activity: activity_state,
         agents: agents::AgentsState::default(),
@@ -416,8 +408,6 @@ impl App {
         self.poll_voice();
         self.poll_calendar_probe();
         self.poll_pending_done();
-        self.poll_schedule();
-        self.poll_agenda();
         self.poll_rsvp();
         self.poll_agents();
         self.poll_autopilot();

@@ -3,10 +3,13 @@
 //! the app only through `Host`; see ARCHITECTURE.md. A new feature adds files
 //! and one line in `features::all`, never a field on `App` or a `UiEvent`.
 
+use meow::actions::QuickAction;
 use meow::activity::Note;
 use meow::claude::ClaudeEnv;
 use meow::conversations::ChatId;
+use meow::plan::{DayPlan, Event};
 use meow::settings::Store;
+use meow::slack::calendar::CalendarTools;
 use meow::sprites::Coat;
 use meow::tasks::TaskList;
 use objc2::MainThreadMarker;
@@ -96,6 +99,22 @@ pub(crate) trait Host {
     fn record(&mut self, note: Note);
     /// The Claude Code setup, once found; `None` before or without one.
     fn claude(&self) -> Option<&ClaudeEnv>;
+    /// The calendar tools of the user's Claude Code, once found.
+    fn calendar_tools(&self) -> Option<&CalendarTools>;
+    /// The quick actions, as configured.
+    fn quick_actions(&self) -> &[QuickAction];
+    /// When quick action `title` last ran, and its day plan if it has one.
+    fn last_result(&self, title: &str) -> Option<(u64, Option<&DayPlan>)>;
+    /// Replaces the agenda of quick action `title`'s day plan; whether that
+    /// changed it. After changing plans, call `plans_changed`.
+    fn set_plan_agenda(&mut self, title: &str, agenda: Vec<Event>) -> bool;
+    /// Saves the quick actions' results and redraws the plan on screen.
+    fn plans_changed(&mut self);
+    /// A request is running or the chat bubble is open.
+    fn chat_in_use(&self) -> bool;
+    /// Runs quick action `index` afresh (in the background when the bubble
+    /// is closed, with `!` over the cat when done).
+    fn run_quick_action(&mut self, index: usize);
     /// The task list. After changing it, call `tasks_changed`.
     fn tasks(&mut self) -> &mut TaskList;
     /// Saves the task list and redraws it.
@@ -144,6 +163,36 @@ impl Host for AppHost<'_> {
 
     fn settings(&mut self) -> &mut Store {
         &mut self.app.store
+    }
+
+    fn calendar_tools(&self) -> Option<&CalendarTools> {
+        self.app.calendar.tools()
+    }
+
+    fn quick_actions(&self) -> &[QuickAction] {
+        &self.app.actions
+    }
+
+    fn last_result(&self, title: &str) -> Option<(u64, Option<&DayPlan>)> {
+        let result = self.app.action_results.get(title)?;
+        Some((result.ran_at, result.plan.as_ref()))
+    }
+
+    fn set_plan_agenda(&mut self, title: &str, agenda: Vec<Event>) -> bool {
+        self.app.action_results.set_agenda(title, agenda)
+    }
+
+    fn plans_changed(&mut self) {
+        self.app.save_action_results();
+        self.app.render_plan();
+    }
+
+    fn chat_in_use(&self) -> bool {
+        !self.app.runs.is_empty() || self.app.chat.is_visible()
+    }
+
+    fn run_quick_action(&mut self, index: usize) {
+        self.app.run_action(index);
     }
 
     fn tasks(&mut self) -> &mut TaskList {
@@ -301,7 +350,6 @@ impl App {
     fn is_idle(&self) -> bool {
         self.runs.is_empty()
             && !self.chat.is_visible()
-            && !self.agenda.is_running()
             && !self.rsvp.is_running()
             && self.slack_assist.run.is_none()
             && !self.agents.is_running()

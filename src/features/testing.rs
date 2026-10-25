@@ -2,10 +2,14 @@
 //! app (no AppKit, no Claude, settings kept in memory), and helpers to read
 //! and click a feature's menu entries.
 
+use meow::action_results::ActionResults;
+use meow::actions::QuickAction;
 use meow::activity::Note;
 use meow::claude::ClaudeEnv;
 use meow::conversations::ChatId;
+use meow::plan::{DayPlan, Event};
 use meow::settings::Store;
+use meow::slack::calendar::CalendarTools;
 use meow::sprites::Coat;
 use meow::tasks::TaskList;
 
@@ -19,6 +23,15 @@ pub(crate) struct FakeHost {
     pub(crate) banners: Vec<String>,
     pub(crate) notes: Vec<Note>,
     pub(crate) badges: Vec<(&'static str, usize)>,
+    /// `None` (the default): Claude is not ready, and nothing ever runs.
+    pub(crate) claude_env: Option<ClaudeEnv>,
+    pub(crate) calendar: Option<CalendarTools>,
+    pub(crate) actions: Vec<QuickAction>,
+    pub(crate) results: ActionResults,
+    pub(crate) plans_changes: usize,
+    pub(crate) chat_in_use: bool,
+    /// Each quick action asked to run, by index.
+    pub(crate) ran_actions: Vec<usize>,
     pub(crate) settings: Store,
     pub(crate) tasks: TaskList,
     /// How many times the task list was said to have changed.
@@ -58,7 +71,36 @@ impl Host for FakeHost {
     }
 
     fn claude(&self) -> Option<&ClaudeEnv> {
-        None
+        self.claude_env.as_ref()
+    }
+
+    fn calendar_tools(&self) -> Option<&CalendarTools> {
+        self.calendar.as_ref()
+    }
+
+    fn quick_actions(&self) -> &[QuickAction] {
+        &self.actions
+    }
+
+    fn last_result(&self, title: &str) -> Option<(u64, Option<&DayPlan>)> {
+        let result = self.results.get(title)?;
+        Some((result.ran_at, result.plan.as_ref()))
+    }
+
+    fn set_plan_agenda(&mut self, title: &str, agenda: Vec<Event>) -> bool {
+        self.results.set_agenda(title, agenda)
+    }
+
+    fn plans_changed(&mut self) {
+        self.plans_changes += 1;
+    }
+
+    fn chat_in_use(&self) -> bool {
+        self.chat_in_use
+    }
+
+    fn run_quick_action(&mut self, index: usize) {
+        self.ran_actions.push(index);
     }
 
     fn settings(&mut self) -> &mut Store {
