@@ -8,6 +8,7 @@ use meow::claude::ClaudeEnv;
 use meow::conversations::ChatId;
 use meow::settings::Store;
 use meow::sprites::Coat;
+use meow::tasks::TaskList;
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::NSView;
@@ -95,6 +96,12 @@ pub(crate) trait Host {
     fn record(&mut self, note: Note);
     /// The Claude Code setup, once found; `None` before or without one.
     fn claude(&self) -> Option<&ClaudeEnv>;
+    /// The task list. After changing it, call `tasks_changed`.
+    fn tasks(&mut self) -> &mut TaskList;
+    /// Saves the task list and redraws it.
+    fn tasks_changed(&mut self);
+    /// The status after "Tasks" in the Tasks page's header, e.g. "checked at 09:40".
+    fn set_tasks_status(&mut self, status: Option<&str>);
     /// The settings file; a feature reads and saves only its own fields.
     fn settings(&mut self) -> &mut Store;
     /// Dresses the cat (and the sidebar's little cat) in `coat`.
@@ -139,6 +146,22 @@ impl Host for AppHost<'_> {
         &mut self.app.store
     }
 
+    fn tasks(&mut self) -> &mut TaskList {
+        &mut self.app.tasks
+    }
+
+    fn tasks_changed(&mut self) {
+        self.app.tasks_changed();
+    }
+
+    fn set_tasks_status(&mut self, status: Option<&str>) {
+        let title = match status {
+            Some(status) => format!("Tasks · {status}"),
+            None => "Tasks".to_string(),
+        };
+        self.app.chat.set_tasks_title(&title);
+    }
+
     fn wear(&mut self, coat: Coat) {
         self.app.wear(coat);
     }
@@ -155,7 +178,12 @@ impl Host for AppHost<'_> {
         self.app.notify(note);
     }
 
+    /// None while taking snapshots: they show pages, and never run Claude to
+    /// act or change the user's data.
     fn claude(&self) -> Option<&ClaudeEnv> {
+        if self.app.snapshot.is_some() {
+            return None;
+        }
         self.app.claude.as_ref()?.as_ref().ok()
     }
 
@@ -273,7 +301,6 @@ impl App {
     fn is_idle(&self) -> bool {
         self.runs.is_empty()
             && !self.chat.is_visible()
-            && !self.sync.is_running()
             && !self.agenda.is_running()
             && !self.rsvp.is_running()
             && self.slack_assist.run.is_none()

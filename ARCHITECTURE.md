@@ -26,6 +26,7 @@ src/
     mod.rs            the registry: `mod x;` and one entry in `all()`
     testing.rs        what feature tests share: a fake `Host`, menu helpers
     appearance/       mod.rs, tests.rs
+    background_check/ mod.rs, tests.rs
     routines/         mod.rs (state, messages, `impl Feature`), page.rs, tests.rs
     update/           mod.rs, tests.rs
   ui/                 AppKit building blocks: windows, pages, widgets, menus
@@ -77,16 +78,21 @@ pub(crate) trait Feature {
 Every method but `poll` has a default, so a feature implements only what it
 uses. A feature reaches the rest of the app only through `Host`: write in a
 conversation (and flag it with `!` over the cat), post a banner, record an
-Activity item, get the Claude setup, read and save its settings, dress the
-cat, size the chat bubble, have its menu items asked for again, set its
+Activity item, get the Claude setup, read and change the task list (then say
+it changed), show a status in the Tasks header, read and save its settings,
+dress the cat, size the chat bubble, have its menu items asked for again, set its
 sidebar count, ask whether the app is idle, quit. When a feature needs
 something new from the app, add one method to `Host` rather than handing out
 `App`. Features do not call each other.
 
+Data the app owns and several parts share, like the task list, stays in the
+app; features reach it through `Host`, never keep their own copy.
+
 Drawing happens in `poll`: a feature marks itself dirty when its data changes
 or its page is shown, and redraws its page and count there. Snapshot mode
 (`MEOW_SNAPSHOT_DIR`) saves every feature page as `<id>.png`, with no change
-to `app/snapshot.rs`.
+to `app/snapshot.rs`; there `Host::claude` is `None`, so no feature runs
+Claude to act or change data while snapshots are taken.
 
 `ui/` never imports from `app/` or `features/`: the examples compile it on
 its own (`#[path = "../src/ui/mod.rs"]`).
@@ -118,17 +124,21 @@ exists to retire.
 ## Migration status
 
 Moved to `src/features/`: `update`, `routines`, `appearance` (the coat and
-the window size, from `app/coat.rs`). The rest still live in
+the window size, from `app/coat.rs`), `background_check` (from `app/sync.rs`).
+The rest still live in
 `src/app/*.rs` as `impl App` blocks, with fields on `App`, `UiEvent` variants
 and `Controller` methods. Move them one PR each, roughly from the least to the
 most entangled:
 
-1. `agents`
-2. `autopilot`
-3. `plan`, `agenda`, `rsvp`, `schedule`, `quick_actions`
-4. `tasks`, `sync`, `task_actions`
-5. `slack`, split into its parts: conversations, `slack_assist`,
-   `slack_voice`, `slack_emoji`, `slack_calendar`
+1. `plan`, `agenda`, `rsvp`, `schedule`, `quick_actions`
+2. `tasks`, `task_actions`
+3. `slack`, split into its parts: conversations, `slack_assist`,
+   `slack_voice`, `slack_emoji`, `slack_calendar`; then `agents` and
+   `autopilot`
+
+**Agents and Autopilot move after Slack**: the Slack panel proposes, starts
+and shows coding agents, and Autopilot reads Slack messages. Moved first, they
+would leave not-yet-moved Slack code reaching into a feature.
 
 **Activity is not a feature but a core service**: six modules write to it,
 its items open other pages, and it drives the news bubble over the cat.

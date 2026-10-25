@@ -18,7 +18,6 @@ mod slack_calendar;
 mod slack_emoji;
 mod slack_voice;
 mod snapshot;
-mod sync;
 mod task_actions;
 
 use std::cell::RefCell;
@@ -132,8 +131,6 @@ struct App {
     voice: slack_voice::VoiceState,
     /// The calendar tools of the user's Claude Code, for events from Slack.
     calendar: slack_calendar::CalendarState,
-    /// The background check of tasks.
-    sync: sync::SyncState,
     /// Daily quick actions.
     schedule: schedule::ScheduleState,
     /// The refresh of today's plan agenda from the calendar.
@@ -278,7 +275,6 @@ pub fn start(mtm: MainThreadMarker) {
         voice: slack_voice::VoiceState::load(),
         emoji: slack_emoji::EmojiState::default(),
         calendar: slack_calendar::CalendarState::default(),
-        sync: sync::SyncState::from_env(),
         schedule: schedule::ScheduleState::new(),
         agenda: agenda::AgendaState::from_env(),
         rsvp: rsvp::RsvpState::default(),
@@ -419,7 +415,6 @@ impl App {
         self.poll_slack_assist();
         self.poll_voice();
         self.poll_calendar_probe();
-        self.poll_sync();
         self.poll_pending_done();
         self.poll_schedule();
         self.poll_agenda();
