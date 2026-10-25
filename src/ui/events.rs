@@ -76,10 +76,8 @@ pub enum UiEvent {
     /// Dismiss the activity item in this row.
     DismissActivity(usize),
     ClearActivity,
-    /// Open the Scheduled page.
-    ShowRoutines,
-    /// Delete the scheduled task in this row.
-    DeleteRoutine(usize),
+    /// Open a feature's page (a sidebar row of `Page::Feature`).
+    ShowPage(crate::ui::sidebar::Page),
     /// Open the Autopilot page.
     ShowAutopilot,
     /// Turn Autopilot on or off.

@@ -125,6 +125,7 @@ cargo run --example news_bubble_preview -- bubble.png  # the cat's news bubble
 To check the look of every page without screen access, run with
 `MEOW_SNAPSHOT_DIR=<folder>`: Meow opens the bubble, saves each page (Chat,
 Tasks, Plan, Autopilot, the Slack list, a conversation, one opened on a marked message and
-Claude's panel, filled with sample messages) as a PNG there, then quits. Snapshots never connect to Slack.
+Claude's panel, filled with sample messages, then each feature's page with your
+data, e.g. `routines.png`) as a PNG there, then quits. Snapshots never connect to Slack.
 
 How the code is organized, and where new code goes: [ARCHITECTURE.md](ARCHITECTURE.md).

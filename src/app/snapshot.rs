@@ -1,8 +1,8 @@
 //! Debug snapshots of the bubble, for checking the look without screen access.
 //!
 //! With `MEOW_SNAPSHOT_DIR` set, Meow opens the bubble a few seconds after
-//! launch, shows each page in turn, saves it as a PNG in that folder, then
-//! quits. The Slack pages are filled with sample messages, so no sign-in is
+//! launch, shows each page in turn (the features' pages last, named after
+//! their id), saves it as a PNG in that folder, then quits. The Slack pages are filled with sample messages, so no sign-in is
 //! needed (launch with dummy `MEOW_SLACK_*` values to keep off the Keychain).
 
 use std::collections::HashMap;
@@ -19,13 +19,14 @@ use crate::ui::emoji_text::{self, ImageGlyph};
 use crate::ui::events::UiEvent;
 use crate::ui::picture::Picture;
 use crate::ui::rich_text;
+use crate::ui::sidebar::Page;
 use crate::ui::slack_assist::AssistView;
 use crate::ui::slack_page::{ConversationRow, TranscriptItem};
 use crate::ui::widgets;
 
 use super::{App, now_secs};
 
-/// The pages, in order; each is saved once it has settled.
+/// The app's pages, in order; each is saved once it has settled.
 const STEPS: [&str; 12] = [
     "chat",
     "chat-two-lines",
@@ -67,10 +68,17 @@ impl Snapshot {
 }
 
 impl App {
+    /// The app's pages, then the features'.
+    fn snapshot_steps(&self) -> Vec<&'static str> {
+        let pages = self.features.iter().filter_map(|f| f.page()).map(|p| p.id);
+        STEPS.into_iter().chain(pages).collect()
+    }
+
     pub(super) fn poll_snapshot(&mut self) {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return;
         };
+        let steps = self.snapshot_steps();
         let next = snapshot.next;
         if snapshot.started.elapsed() < START_DELAY + STEP_DELAY * next as u32 {
             return;
@@ -79,19 +87,19 @@ impl App {
             self.handle(UiEvent::ToggleChat);
         }
         if next > 0 {
-            self.save_snapshot(STEPS[next - 1]);
+            self.save_snapshot(steps[next - 1]);
         }
-        if next == STEPS.len() {
+        if next == steps.len() {
             eprintln!("meow: snapshots saved");
             std::process::exit(0);
         }
-        self.show_snapshot_step(STEPS[next]);
+        self.show_snapshot_step(steps[next]);
         if let Some(snapshot) = self.snapshot.as_mut() {
             snapshot.next += 1;
         }
     }
 
-    fn show_snapshot_step(&mut self, step: &str) {
+    fn show_snapshot_step(&mut self, step: &'static str) {
         match step {
             "chat" => {
                 self.handle(UiEvent::ShowChat);
@@ -153,7 +161,7 @@ impl App {
                     &sample_images(),
                 );
             }
-            _ => {
+            "slack-assist" => {
                 let attendees = ["toi".to_string(), "Hugo".to_string()];
                 self.chat.slack().show_assist(&AssistView::Event {
                     question: "Cale un point avec Hugo demain",
@@ -164,6 +172,8 @@ impl App {
                     creating: false,
                 });
             }
+            // A feature's page, as it is: features show their own data.
+            page => self.open_page(Page::Feature(page)),
         }
     }
 

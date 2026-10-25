@@ -277,18 +277,6 @@ define_class!(
             push(UiEvent::ClearActivity);
         }
 
-        #[unsafe(method(showRoutines:))]
-        fn show_routines(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::ShowRoutines);
-        }
-
-        #[unsafe(method(deleteRoutine:))]
-        fn delete_routine(&self, sender: Option<&AnyObject>) {
-            if let Some(row) = sender_tag(sender) {
-                push(UiEvent::DeleteRoutine(row));
-            }
-        }
-
         #[unsafe(method(showAutopilot:))]
         fn show_autopilot(&self, _sender: Option<&AnyObject>) {
             push(UiEvent::ShowAutopilot);

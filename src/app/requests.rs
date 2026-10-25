@@ -7,7 +7,7 @@ use std::sync::mpsc::TryRecvError;
 
 use meow::claude::{ClaudeEvent, Run};
 use meow::conversations::ChatId;
-use meow::{agent, plan, routines, tasks};
+use meow::{agent, plan, tasks};
 
 use super::{App, now_secs};
 
@@ -51,13 +51,10 @@ impl App {
         if let Some(request) = agent_request(text) {
             return self.request_agent_in_chat(&id, text, request);
         }
-        // Claude reports "do this later" requests instead of doing them now,
-        // and sees the scheduled tasks there are, to change or restart them.
-        let prompt = format!(
-            "{}\n\n{}",
-            self.prompt_for(&id, text),
-            routines::instruction(now_secs(), &self.routines.routines)
-        );
+        let prompt = std::iter::once(self.prompt_for(&id, text))
+            .chain(self.feature_instructions(now_secs()))
+            .collect::<Vec<_>>()
+            .join("\n\n");
         self.start_request(&id, text, &prompt, RunKind::Message);
     }
 
@@ -198,7 +195,7 @@ impl App {
                 let (shown, found) = tasks::extract(&text);
                 let (shown, _) = plan::extract(&shown);
                 let (shown, _) = agent::extract(&shown);
-                let (shown, _) = routines::extract(&shown);
+                let shown = self.features_read_reply(&id, &shown, false);
                 self.add_found_tasks(&id, &found);
                 if !shown.is_empty() {
                     self.transcript(&id).text(&shown);
@@ -252,7 +249,7 @@ impl App {
                 }
                 let (shown, found) = tasks::extract(&result);
                 let (shown, day_plan) = plan::extract(&shown);
-                let (shown, schedule) = routines::extract(&shown);
+                let shown = self.features_read_reply(&id, &shown, true);
                 self.add_found_tasks(&id, &found);
                 if let Some(day_plan) = &day_plan {
                     self.add_found_tasks(&id, &day_plan.tasks());
@@ -262,9 +259,6 @@ impl App {
                     self.record_action_result(*index, &shown, day_plan);
                 }
                 self.finish_run(&id, &shown);
-                if let Some(spec) = schedule {
-                    self.apply_routine(&id, &spec);
-                }
                 if new_plan && self.conversations.active() == &id {
                     self.show_conversation(id);
                 }

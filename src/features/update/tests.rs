@@ -5,42 +5,11 @@ use meow::conversations::ChatId;
 use meow::update::Manifest;
 
 use super::{Staged, Update};
-use crate::app::feature::{Feature, Host};
+use crate::app::feature::Feature;
+use crate::features::fake_host::FakeHost;
 use crate::ui::menus::MenuEntry;
 
 const WHY: &str = "This is a local build of Meow: it does not update itself.";
-
-/// Records what the update feature tells the app.
-#[derive(Default)]
-struct FakeHost {
-    infos: Vec<(ChatId, String)>,
-    errors: Vec<(ChatId, String)>,
-    banners: Vec<String>,
-    idle: bool,
-    quit: bool,
-}
-
-impl Host for FakeHost {
-    fn info_in(&mut self, chat: &ChatId, text: &str) {
-        self.infos.push((chat.clone(), text.to_string()));
-    }
-
-    fn error_in(&mut self, chat: &ChatId, text: &str) {
-        self.errors.push((chat.clone(), text.to_string()));
-    }
-
-    fn notify(&mut self, text: &str) {
-        self.banners.push(text.to_string());
-    }
-
-    fn is_idle(&self) -> bool {
-        self.idle
-    }
-
-    fn quit(&mut self) {
-        self.quit = true;
-    }
-}
 
 fn local_build() -> Update {
     Update::new(None, Duration::from_secs(3600), Some(WHY))

@@ -31,6 +31,11 @@ impl<M> Mailbox<M> {
         }
     }
 
+    /// Whether nothing was sent since the last drain.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.queue.borrow().is_empty()
+    }
+
     /// The messages sent since the last drain, oldest first.
     pub(crate) fn drain(&self) -> Vec<M> {
         self.queue.borrow_mut().drain(..).collect()
@@ -71,6 +76,16 @@ mod tests {
         first.send(3);
         assert_eq!(mailbox.drain(), [1, 2, 3]);
         assert!(mailbox.drain().is_empty());
+    }
+
+    #[test]
+    fn is_empty_until_something_is_sent_and_again_once_drained() {
+        let mailbox = Mailbox::new();
+        assert!(mailbox.is_empty());
+        mailbox.sender().send(1);
+        assert!(!mailbox.is_empty());
+        mailbox.drain();
+        assert!(mailbox.is_empty());
     }
 
     #[test]
