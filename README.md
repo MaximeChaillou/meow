@@ -1,131 +1,116 @@
 # Meow
 
-A pixel-art cat that walks along the bottom of your macOS screen and runs your
-everyday requests through Claude Code.
+**A pixel-art cat that lives at the bottom of your Mac's screen, and quietly
+takes care of your day.**
 
-Requests go through `claude -p` (the Claude Code CLI in print mode), so they
-use your regular Claude subscription, not API billing.
+Meow walks along the bottom of your screen, naps, plays with your mouse
+pointer and, now and then, coughs up a hairball. Click it and it becomes your
+assistant: ask it anything, and it plans your day, keeps your to-do list, reads
+your Slack and remembers what you asked it to do later. It runs on your Claude
+subscription.
 
-## Use
+## Talk to the cat
 
-- **Click the cat** or press **⌥⇧Space** to open the chat, type a request, press Enter.
-- While Claude works, the cat sits with a `…` bubble. If the reply arrives while
-  the chat is closed, it shows a `!` until you click it.
-- When there is unread news in **Activity**, the `!` becomes a bubble with the
-  icons of where it comes from (Slack, GitHub, Linear…; past three sources, one
-  stack icon with their number). Clicking the cat then opens Activity.
-- Answers are rendered from Markdown: headings, bold/italic, code, lists,
-  tables, quotes and clickable links.
-- Working steps (tool calls, sub-agents, interim messages) are folded under a
-  `▸ N steps` line above each answer; click it to show them.
-- **Esc** cancels the request of the conversation on screen, or closes the
-  chat. Other conversations (another task, a quick action) keep theirs running:
-  each conversation runs one request at a time, side by side with the others.
-- **New** (or `/new`, or ⌘N) starts a fresh conversation. Otherwise follow-ups
-  continue the same Claude session (`--resume`).
-- **Right-click the cat** for the quick actions, Open Chat, New Conversation
-  and Quit. Quick actions are also in the chat's sidebar.
-- **Clicking a quick action shows its last result** (and when it ran);
-  **[ RUN ]** runs it again. An action that never ran runs on the first click
-  (in the background from the cat's menu; the cat shows `!` when done). Ask
-  follow-up questions right under the result.
-- **Drag the cat** to pick it up by the scruff: it kicks, then hangs limp and
-  swings as you move it. Let go and it falls back down; drag fast to throw it
-  (thrown hard at a screen edge it clings to it with its paws, then
-  hops down, or now and then slides down the wall; thrown hard at the top it hangs there upside down, then drops; a
-  gentle throw just bounces off). With several displays, carry or throw it
-  across to another one: only the outer edges of your screens are walls.
-- **Pet the cat** by stroking it: move the mouse back and forth over it (no
-  click). It closes its eyes and little hearts float up.
-- **Dress the cat like yours**: right-click the cat › **Theme** picks its coat
-  (Ginger, Willow, Alfie, or Dédé, who is a pig). **Add from Cat Photo…** asks for a photo of your
-  cat; Claude (Haiku, allowed only to read a shrunk copy of the photo) picks
-  the color of its fur, stripes, blaze, muzzle, legs, tail and each eye, and
-  names the theme (after the file's name when that looks like the cat's). The
-  cat sits with a `…` bubble meanwhile, then wears it. Your themes are listed
-  under the built-in ones; a new photo with the same name replaces the old
-  theme, and **Remove** deletes the one being worn. They are saved in
-  `~/Library/Application Support/Meow/settings.json`.
-- **Now and then the cat coughs up a hairball** (or on demand: **Hairball** in
-  its menu). It stays on the floor until you clean it: scrub it with the mouse
-  button down, or click it a few times, until it sparkles and is gone.
-- **Dédé the pig poops instead** (the item is called **Poop** then): he
-  squats, drops it behind him, turns around to admire it, hearts floating up,
-  and eats it. Wipe it before he does and he goes off disappointed.
+Click the cat, or press **⌥⇧Space** from anywhere, and a pixel speech bubble
+opens. Type what you need and press Enter: *"what's on my plate today?"*,
+*"summarize my unread emails"*, *"what did Ana ask me this morning?"*
 
-Requests use **Haiku** (latest version) by default, the cheapest Claude model,
-which is plenty for fetching from connectors and summarizing; sub-agents use it
-too. Claude runs with `--permission-mode auto` in your home directory, with your
-usual Claude Code settings, MCP servers and skills, plus Meow's own tools (see
-[Meow's data in the chat](docs/features/meow-data.md)).
+While it works, the cat sits with a little `…` over its head. Close the bubble
+and carry on: when the answer is ready, the cat shows a `!` until you come back
+to read it. Several conversations can run side by side, one per task.
 
-## Look
+## What it does for you
 
-The chat opens as the cat's pixel-art speech bubble (drag it by its background,
-close it with Esc, the ✕, by clicking the cat, or just by clicking elsewhere), dark
-with an 8-bit palette (Sweetie 16). Text uses three pixel fonts: VT323
-for messages, Silkscreen for labels and Press Start 2P for titles, bundled in
-`assets/fonts` under the SIL Open Font License.
+**Plans your day.** Every morning at 7:00, before you even ask, Meow puts
+together your day: the meetings ahead (with their room), the three things to
+focus on first and why, the replies you owe, and the rest for later. Unanswered
+invitations come with Accept and Decline buttons, and the agenda keeps itself
+up to date as your calendar changes.
 
-## Build and run
+**Keeps your to-do list.** Meow gathers what needs you from Slack, GitHub,
+Linear and your mail into one list, sorted by where it comes from. Every few
+minutes it looks again: it adds what's new and ticks off what got done
+elsewhere, like a pull request merged or an email answered. When you tick a
+task yourself, Meow can draft the reply that says so.
 
-Requires Rust and Claude Code (`claude` logged in).
+**Brings Slack along.** Read and answer your direct messages and channels right
+in the bubble, emoji and images included. Ask Meow privately about a
+conversation, have it draft your reply (in your own writing style, if you like),
+or turn "let's meet tomorrow" into a calendar event.
 
-```sh
-cargo run                       # run from the terminal
-scripts/bundle.sh               # build target/release/Meow.app (--universal: Apple silicon + Intel)
-scripts/bundle.sh --install     # ...and copy it to ~/Applications
-```
+**Remembers things for later.** *"At 17:00, send me a summary of my unread
+emails."* *"When Staples replies to Cyril, let me know."* Meow schedules it,
+keeps watch, and tells you, or does what you asked, when the time comes.
 
-To start it at login, add `Meow.app` in System Settings › General › Login Items.
+**Tells you what happened.** While you were away, the Activity page collects
+what came up: new messages, calendar changes, tasks found or done, scheduled
+tasks that ran. The cat's `!` turns into a little bubble showing where the
+news comes from.
 
-The Slack sign-in lives in the Keychain, which trusts an app by its signature.
-Run `scripts/setup-dev-signing.sh` once: it creates a self-signed "Meow Dev"
-identity, and every `cargo run` / `cargo test` binary (and `scripts/bundle.sh`)
-is then signed with it, so Keychain access granted once survives rebuilds.
+**Gets work started for you.** With Autopilot on, when someone asks you for
+something on Slack ("your PR has conflicts", "can you look at why the build
+fails"), Meow prepares the work by itself. Anything that can't be undone, like
+sending a message or publishing code, waits for your approval. It's off until
+you turn it on.
 
-Meow used to be called Lazy: on first launch it moves data saved under the old
-name (`~/Library/Application Support/Lazy`, `~/.config/lazy`) to the new folders.
+**Hands off coding work.** Ask in the chat, or from a Slack conversation, and
+Meow starts a coding agent in [Superset](https://superset.sh) on its own copy
+of your project, ready for you to review.
 
-## Features
+## A real cat
 
-Each feature has its own page (one file each, so changes to different
-features never touch the same lines):
+Meow isn't only useful, it's good company.
 
-- [Activity](docs/features/activity.md)
-- [Autopilot](docs/features/autopilot.md)
-- [Background check](docs/features/background-check.md)
-- [Coding agents (Superset)](docs/features/coding-agents.md)
-- [Meow's data in the chat](docs/features/meow-data.md)
-- [Quick actions](docs/features/quick-actions.md)
-- [Scheduled tasks](docs/features/scheduled-tasks.md)
-- [Slack](docs/features/slack.md)
-- [Tasks](docs/features/tasks.md)
-- [Releases and updates](docs/features/update.md)
+- **Pet it** by stroking it with the pointer: it closes its eyes and little
+  hearts float up.
+- **Pick it up** by dragging it: it kicks, then hangs limp. Throw it and it
+  bounces off, clings to the side of the screen, or hangs from the top. With
+  several screens, toss it from one to the other.
+- **Feed it** a bowl of kibble, or **let a mouse in** for it to chase, from its
+  menu (right-click the cat).
+- **Clean up after it**: now and then it coughs up a hairball that stays on the
+  floor until you scrub it away.
+- **Dress it like yours**: pick a coat (Ginger, Willow, Alfie, a corgi, or
+  Dédé, who is a pig and has his own habits), or show Meow a photo of your own
+  cat and it takes on its colors.
 
-## Settings (environment variables)
+## Get Meow
 
-These apply to every request; each feature's page lists its own.
+1. Download **Meow.dmg** from the
+   [latest release](https://github.com/axellaffite/meow/releases/latest), open
+   it and drag Meow to your Applications folder.
+2. The first time, right-click Meow and choose **Open**.
+3. Meow works through your Claude account: install
+   [Claude Code](https://claude.com/claude-code) and sign in once. To let Meow
+   see your calendar, mail, Linear or GitHub, connect them to your Claude
+   account.
 
-| Variable          | Default                       | Effect                          |
-|-------------------|-------------------------------|---------------------------------|
-| `MEOW_CLAUDE_BIN` | `claude` from your shell PATH | Path to the Claude Code CLI     |
-| `MEOW_CWD`        | `$HOME`                       | Working directory for requests  |
-| `MEOW_MODEL`      | `haiku`                       | Claude model for requests and their sub-agents (e.g. `sonnet`) |
+Meow keeps itself up to date: new versions install themselves while you're not
+using it.
 
-## Develop
+## Good to know
 
-```sh
-cargo test                                  # behaviour, sprites, CLI stream parsing
-cargo run --example preview -- sprites.png  # render every pose to a PNG sheet
-cargo run --example activity_preview -- activity.png  # the Activity page with sample news
-cargo run --example news_bubble_preview -- bubble.png  # the cat's news bubble
-```
+- **Slack** connects with your own sign-in, the way your browser does, rather
+  than through a Slack app. Check that this is fine at your workplace before
+  you use it; the [Slack page](docs/features/slack.md) explains what it means.
+- **Meow acts when you ask.** Its background checks only read, and Autopilot
+  holds every step that can't be undone until you approve it.
 
-To check the look of every page without screen access, run with
-`MEOW_SNAPSHOT_DIR=<folder>`: Meow opens the bubble, saves each page (Chat,
-Tasks, Plan, Autopilot, the Slack list, a conversation, one opened on a marked message and
-Claude's panel, filled with sample messages, then each feature's page with your
-data, e.g. `routines.png`) as a PNG there, then quits. Snapshots never connect to Slack.
+## Learn more
 
-How the code is organized, and where new code goes: [ARCHITECTURE.md](ARCHITECTURE.md).
+Every click, key and gesture: [Using Meow](docs/using.md).
+
+Each feature has its own page with the details:
+[Activity](docs/features/activity.md),
+[Autopilot](docs/features/autopilot.md),
+[Background check](docs/features/background-check.md),
+[Coding agents](docs/features/coding-agents.md),
+[Meow's data in the chat](docs/features/meow-data.md),
+[Quick actions](docs/features/quick-actions.md),
+[Scheduled tasks](docs/features/scheduled-tasks.md),
+[Slack](docs/features/slack.md),
+[Tasks](docs/features/tasks.md) and
+[Updates](docs/features/update.md).
+
+Building Meow yourself or working on it: see
+[Developing Meow](docs/development.md).
