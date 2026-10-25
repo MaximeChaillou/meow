@@ -6,6 +6,8 @@ mod agents;
 mod autopilot;
 mod coat;
 mod downloads;
+pub(crate) mod feature;
+pub(crate) mod mailbox;
 mod plan;
 mod quick_actions;
 mod requests;
@@ -20,7 +22,6 @@ mod slack_voice;
 mod snapshot;
 mod sync;
 mod task_actions;
-mod update;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -146,8 +147,8 @@ struct App {
     agents: agents::AgentsState,
     /// Work started from Slack messages, waiting for approval.
     autopilot: autopilot::AutopilotState,
-    /// Updates from the GitHub releases, for release builds.
-    update: update::UpdateState,
+    /// The features moved to `src/features/` (see ARCHITECTURE.md).
+    features: Vec<Box<dyn feature::Feature>>,
     /// A reply arrived out of sight; the cat shows `!` until it is seen.
     unread: bool,
     /// The conversation whose reply is waiting.
@@ -167,13 +168,14 @@ pub fn start(mtm: MainThreadMarker) {
     let controller = Controller::new(mtm);
     let (actions, actions_error) = load_actions();
     let (settings, settings_path, settings_error) = coat::load_settings();
+    let features = crate::features::all();
     menus::install_main_menu(mtm, &controller);
     let (cat_menu, coat_menu) = menus::cat_menu(
         mtm,
         &controller,
         &actions,
         &settings,
-        &update::version_label(),
+        features.iter().flat_map(|f| f.menu()).collect(),
     );
     let cat_window = CatWindow::new(mtm, &cat_menu);
     let prop_window = CatWindow::prop(mtm);
@@ -285,7 +287,7 @@ pub fn start(mtm: MainThreadMarker) {
         routines: routine_state,
         agents: agents::AgentsState::default(),
         autopilot: autopilot_state,
-        update: update::UpdateState::from_env(),
+        features,
         snapshot: snapshot::Snapshot::from_env(),
         _hotkeys: hotkeys,
     };
@@ -412,7 +414,7 @@ impl App {
         self.poll_agents();
         self.poll_autopilot();
         self.poll_snapshot();
-        self.poll_update();
+        self.poll_features();
         self.animate(dt);
     }
 
@@ -660,13 +662,14 @@ impl App {
             UiEvent::FocusLost if !self.chat.is_key() => self.chat.hide(),
             UiEvent::FocusLost => {}
             UiEvent::NewConversation => self.new_conversation(),
-            UiEvent::CheckForUpdates => self.check_for_updates(update::Asked::Banner),
-            UiEvent::Quit => {
-                pointer::release();
-                self.slack.save_cache();
-                NSApplication::sharedApplication(self.mtm).terminate(None);
-            }
+            UiEvent::Quit => self.quit(),
         }
+    }
+
+    fn quit(&mut self) {
+        pointer::release();
+        self.slack.save_cache();
+        NSApplication::sharedApplication(self.mtm).terminate(None);
     }
 
     fn toggle_chat(&mut self) {

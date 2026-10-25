@@ -1,4 +1,5 @@
 mod app;
+mod features;
 mod ui;
 
 use objc2::MainThreadMarker;

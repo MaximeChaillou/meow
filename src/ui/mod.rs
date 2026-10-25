@@ -1,3 +1,4 @@
+pub mod action;
 pub mod activity_page;
 pub mod autopilot_page;
 pub mod bubble;
