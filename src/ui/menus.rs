@@ -13,7 +13,30 @@ use meow::actions::QuickAction;
 use meow::settings::{Settings, WindowSize};
 use meow::sprites::Coat;
 
+use super::action::Action;
 use super::controller::Controller;
+
+/// An item a feature adds to the cat's menu (see `Feature::menu`).
+pub enum MenuEntry {
+    /// A greyed-out line of information.
+    Label(String),
+    /// Runs `run` when chosen; it should only send to the feature's mailbox.
+    Action { title: String, run: Box<dyn Fn()> },
+}
+
+fn entry_item(mtm: MainThreadMarker, entry: MenuEntry) -> Retained<NSMenuItem> {
+    match entry {
+        MenuEntry::Label(text) => label(mtm, &text),
+        MenuEntry::Action { title, run } => {
+            let action = Action::new(mtm, run);
+            let entry = item(mtm, &title, Action::selector(), "", Some(&action));
+            // SAFETY: the item holds its represented object strongly, which keeps
+            // the action alive as long as the item; its target alone would not.
+            unsafe { entry.setRepresentedObject(Some(&action)) };
+            entry
+        }
+    }
+}
 
 fn item(
     mtm: MainThreadMarker,
@@ -182,12 +205,13 @@ pub fn fill_coat_menu(
 }
 
 /// The cat's right-click menu, and its theme submenu to check the coat in later.
+/// The features' entries go above "Quit Meow".
 pub fn cat_menu(
     mtm: MainThreadMarker,
     controller: &Controller,
     actions: &[QuickAction],
     settings: &Settings,
-    version: &str,
+    features: Vec<MenuEntry>,
 ) -> (Retained<NSMenu>, Retained<NSMenu>) {
     let target: &AnyObject = controller;
     let mut items: Vec<_> = actions
@@ -225,19 +249,9 @@ pub fn cat_menu(
     let coats = menu(mtm, "Theme", &[]);
     let theme = submenu_item(mtm, &coats);
     theme.setTitle(&NSString::from_str("Theme"));
-    items.extend([
-        theme,
-        NSMenuItem::separatorItem(mtm),
-        label(mtm, version),
-        item(
-            mtm,
-            "Check for Updates",
-            sel!(checkForUpdates:),
-            "",
-            Some(target),
-        ),
-        item(mtm, "Quit Meow", sel!(quit:), "", Some(target)),
-    ]);
+    items.extend([theme, NSMenuItem::separatorItem(mtm)]);
+    items.extend(features.into_iter().map(|entry| entry_item(mtm, entry)));
+    items.push(item(mtm, "Quit Meow", sel!(quit:), "", Some(target)));
     let cat_menu = menu(mtm, "Meow", &items);
     // Once in the cat's menu, so it can title the hairball item too.
     fill_coat_menu(mtm, &coats, target, settings, false);

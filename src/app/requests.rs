@@ -9,7 +9,6 @@ use meow::claude::{ClaudeEvent, Run};
 use meow::conversations::ChatId;
 use meow::{agent, plan, routines, tasks};
 
-use super::update::Asked;
 use super::{App, now_secs};
 
 /// Whether a request is a quick action's run (its answer is saved as the
@@ -23,7 +22,6 @@ pub enum RunKind {
 }
 
 const AGENT_COMMAND: &str = "/agent";
-const UPDATE_COMMAND: &str = "/update";
 
 pub(super) const STILL_WORKING: &str = "Still working on the last request (Esc to cancel).";
 
@@ -47,8 +45,8 @@ impl App {
             return;
         }
         let id = self.conversations.active().clone();
-        if text == UPDATE_COMMAND {
-            return self.check_for_updates(Asked::Chat(id));
+        if self.feature_command(text, &id) {
+            return;
         }
         if let Some(request) = agent_request(text) {
             return self.request_agent_in_chat(&id, text, request);
