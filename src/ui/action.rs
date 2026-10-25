@@ -5,6 +5,9 @@
 //! AppKit holds targets weakly: whoever builds the control keeps the action
 //! alive (a menu item keeps it as its represented object, see `ui::menus`).
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
@@ -38,5 +41,46 @@ impl Action {
     /// The selector to pair with this target on a control.
     pub fn selector() -> Sel {
         sel!(run:)
+    }
+}
+
+/// The targets of one page's controls: each runs `send` with the action it
+/// was made for. The sink keeps them alive, as controls hold their target
+/// weakly; `clear` lets go of those whose controls were removed, e.g. rows
+/// drawn again.
+pub struct ActionSink<A> {
+    mtm: MainThreadMarker,
+    send: Rc<dyn Fn(A)>,
+    kept: RefCell<Vec<Retained<Action>>>,
+}
+
+impl<A: Clone + 'static> ActionSink<A> {
+    pub fn new(mtm: MainThreadMarker, send: impl Fn(A) + 'static) -> Self {
+        Self {
+            mtm,
+            send: Rc::new(send),
+            kept: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Another sink sending the same way, with targets of its own to clear.
+    pub fn sibling(&self) -> Self {
+        Self {
+            mtm: self.mtm,
+            send: Rc::clone(&self.send),
+            kept: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// A target sending `action`, to pair with `Action::selector()`.
+    pub fn target(&self, action: A) -> Retained<Action> {
+        let send = Rc::clone(&self.send);
+        let target = Action::new(self.mtm, move || send(action.clone()));
+        self.kept.borrow_mut().push(target.clone());
+        target
+    }
+
+    pub fn clear(&self) {
+        self.kept.borrow_mut().clear();
     }
 }

@@ -22,7 +22,7 @@ use crate::ui::emoji_text;
 use crate::ui::rich_text;
 use crate::ui::sidebar::Page;
 use crate::ui::signin::SignIn;
-use crate::ui::slack_page::{ConversationRow, SlackTab, TranscriptItem};
+use crate::ui::slack_page::{ConversationRow, SlackAction, SlackTab, TranscriptItem};
 
 use super::{App, now_secs};
 
@@ -329,6 +329,27 @@ impl SlackState {
 }
 
 impl App {
+    /// A control of the Slack page.
+    pub(super) fn slack_action(&mut self, action: SlackAction) {
+        match action {
+            SlackAction::SignIn => self.sign_in_slack(),
+            SlackAction::Tab(tab) => self.show_slack_tab(tab),
+            SlackAction::Open(row) => self.open_slack_conversation(row),
+            SlackAction::OpenThread(index) => self.open_slack_thread(index),
+            SlackAction::Back => self.slack_back(),
+            SlackAction::Send => self.send_slack(),
+            SlackAction::Ask => self.ask_slack(),
+            SlackAction::Autocomplete => self.autocomplete_slack(),
+            SlackAction::Agent => self.agent_slack(),
+            SlackAction::ToggleWriteAsMe => self.toggle_write_as_me(),
+            SlackAction::LearnMyStyle => self.learn_my_style(),
+            SlackAction::UseDraft => self.use_slack_draft(),
+            SlackAction::CreateEvent => self.create_slack_event(),
+            SlackAction::CloseAssist => self.close_slack_assist(),
+            SlackAction::StartAgent => self.start_slack_agent(),
+        }
+    }
+
     /// Opens the Slack page, connecting state to the view.
     pub(super) fn show_slack(&mut self) {
         if !self.chat.is_visible() {
