@@ -6,8 +6,7 @@ use meow::update::Manifest;
 
 use super::{Staged, Update};
 use crate::app::feature::Feature;
-use crate::features::fake_host::FakeHost;
-use crate::ui::menus::MenuEntry;
+use crate::features::testing::{FakeHost, click, describe};
 
 const WHY: &str = "This is a local build of Meow: it does not update itself.";
 
@@ -35,27 +34,10 @@ fn with_staged(staged: PathBuf) -> Update {
     update
 }
 
-fn click(update: &Update, title: &str) {
-    let entries = update.menu();
-    let run = entries.iter().find_map(|entry| match entry {
-        MenuEntry::Action { title: t, run } if t == title => Some(run),
-        _ => None,
-    });
-    run.expect("menu item")();
-}
-
 #[test]
 fn menu_shows_the_version_then_check_for_updates() {
-    let titles: Vec<_> = local_build()
-        .menu()
-        .iter()
-        .map(|entry| match entry {
-            MenuEntry::Label(text) => format!("label: {text}"),
-            MenuEntry::Action { title, .. } => format!("action: {title}"),
-        })
-        .collect();
     assert_eq!(
-        titles,
+        describe(&local_build().menu()),
         ["label: Version: local build", "action: Check for Updates"]
     );
 }
@@ -64,7 +46,7 @@ fn menu_shows_the_version_then_check_for_updates() {
 fn check_from_the_menu_on_a_local_build_says_why_in_a_banner() {
     let mut update = local_build();
     let mut host = FakeHost::default();
-    click(&update, "Check for Updates");
+    click(&update.menu(), &["Check for Updates"]);
     assert!(
         host.banners.is_empty(),
         "handled on the next poll, not in the click"

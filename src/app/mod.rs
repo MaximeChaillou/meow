@@ -4,7 +4,6 @@ mod activity;
 mod agenda;
 mod agents;
 mod autopilot;
-mod coat;
 mod downloads;
 pub(crate) mod feature;
 pub(crate) mod mailbox;
@@ -38,9 +37,9 @@ use meow::actions::{self, QuickAction};
 use meow::behavior::{Bounds, Cat, Inputs, PropView, Rng};
 use meow::claude::ClaudeEnv;
 use meow::conversations::{ChatId, Conversation, Conversations};
-use meow::settings::Settings;
+use meow::settings::{self, Settings, Store};
 use meow::source::Icons;
-use meow::sprites::{Facing, Look, render, render_prop};
+use meow::sprites::{Coat, Facing, Look, render, render_prop};
 use meow::tasks::{self, TaskList};
 use meow::transcript::Transcript;
 use objc2::MainThreadMarker;
@@ -101,13 +100,16 @@ struct App {
     action_results: ActionResults,
     /// Where action results are saved; `None` when the file could not be read.
     results_path: Option<PathBuf>,
+    /// The settings the app itself owns, read from `store`.
     settings: Settings,
-    /// Where settings are saved; `None` when the file could not be read.
-    settings_path: Option<PathBuf>,
-    /// The theme submenu of the cat's menu, to check the current coat.
-    coat_menu: Retained<NSMenu>,
-    /// A theme being made from a photo of the user's cat.
-    cat_photo: coat::CatPhotoState,
+    /// The settings file, shared with the features.
+    store: Store,
+    /// The cat's right-click menu.
+    cat_menu: Retained<NSMenu>,
+    /// A feature changed its menu items: the cat's menu is filled again.
+    menu_changed: bool,
+    /// What the cat wears, as the appearance feature says.
+    coat: Coat,
     cat: Cat,
     /// The screen height of the ground the cat's height is measured from:
     /// the bottom of the screen it is on.
@@ -164,23 +166,20 @@ pub fn start(mtm: MainThreadMarker) {
         .unwrap_or_default();
     let controller = Controller::new(mtm);
     let (actions, actions_error) = load_actions();
-    let (settings, settings_path, settings_error) = coat::load_settings();
-    let mut features = crate::features::all();
+    let (mut store, load_error) = load_settings();
+    let (settings, read_error) = match store.get::<Settings>() {
+        Ok(settings) => (settings, None),
+        Err(error) => (Settings::default(), Some(unsaved(&error))),
+    };
+    let settings_error = load_error.or(read_error);
+    let mut features = crate::features::all(&mut store);
     menus::install_main_menu(mtm, &controller);
-    let (cat_menu, coat_menu) = menus::cat_menu(
-        mtm,
-        &controller,
-        &actions,
-        &settings,
-        features.iter().flat_map(|f| f.menu()).collect(),
-    );
+    let cat_menu = menus::cat_menu(mtm);
     let cat_window = CatWindow::new(mtm, &cat_menu);
     let prop_window = CatWindow::prop(mtm);
     let pages: Vec<_> = features.iter().filter_map(|f| f.page()).collect();
     let chat = ChatWindow::new(mtm, &controller, &actions, &pages);
     feature::attach_pages(mtm, &mut features, &chat);
-    chat.set_size(settings.window_size.points());
-    chat.set_coat(settings.coat);
 
     let mut main = Transcript::default();
     let (hotkeys, hotkey_error) = match register_hotkey() {
@@ -235,8 +234,6 @@ pub fn start(mtm: MainThreadMarker) {
             ((bounds.min_x + bounds.max_x) / 2.0, ground)
         })
         .unwrap_or((0.0, 0.0));
-    let mut cat = Cat::new(start_x);
-    cat.set_pig(settings.coat.is_pig());
     let app = App {
         mtm,
         controller,
@@ -258,10 +255,12 @@ pub fn start(mtm: MainThreadMarker) {
         action_results,
         results_path,
         settings,
-        settings_path,
-        coat_menu,
-        cat_photo: coat::CatPhotoState::default(),
-        cat,
+        store,
+        cat_menu,
+        menu_changed: false,
+        // Dressed by the appearance feature at the first tick, before drawing.
+        coat: Coat::default(),
+        cat: Cat::new(start_x),
         ground,
         rng: Rng::new(seed()),
         last_look: None,
@@ -290,6 +289,7 @@ pub fn start(mtm: MainThreadMarker) {
         snapshot: snapshot::Snapshot::from_env(),
         _hotkeys: hotkeys,
     };
+    app.fill_cat_menu();
     APP.with(|cell| cell.replace(Some(app)));
     schedule_ticks();
 }
@@ -310,6 +310,22 @@ fn schedule_ticks() {
         let timer = NSTimer::timerWithTimeInterval_repeats_block(TICK_SECONDS, true, &block);
         NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
     }
+}
+
+/// The settings file, or why it could not be read (then nothing is saved).
+fn load_settings() -> (Store, Option<String>) {
+    let Some(path) = settings::default_path() else {
+        return (Store::unsaved(), None);
+    };
+    match Store::load(&path) {
+        Ok(store) => (store, None),
+        Err(error) => (Store::unsaved(), Some(unsaved(&error))),
+    }
+}
+
+/// Why settings could not be read, and what that means.
+pub(crate) fn unsaved(error: &str) -> String {
+    format!("{error}. Settings changes won't be saved.")
 }
 
 /// Quick actions from the config file, or the defaults plus the reason it could not be used.
@@ -408,7 +424,6 @@ impl App {
         self.poll_schedule();
         self.poll_agenda();
         self.poll_rsvp();
-        self.poll_cat_photo();
         self.poll_agents();
         self.poll_autopilot();
         self.poll_snapshot();
@@ -419,7 +434,7 @@ impl App {
     fn inputs(&self) -> Inputs {
         Inputs {
             // Looking at a photo of the user's cat shows too: it takes a while.
-            busy: !self.runs.is_empty() || self.cat_photo.is_running(),
+            busy: !self.runs.is_empty() || self.features_thinking(),
             chat_open: self.chat.is_visible(),
             unread: self.unread,
             news: self.activity.log.unread_count() > 0,
@@ -459,7 +474,7 @@ impl App {
         let origin = NSPoint::new(self.cat.x, ground + self.cat.y);
         let look = self.show_news(look, origin, frame);
         if self.last_look != Some(look) {
-            let sprite = render(&look, self.settings.coat);
+            let sprite = render(&look, self.coat);
             self.cat_overflow.view.show(sprite.clone());
             self.cat_window.view.show(sprite);
             self.last_look = Some(look);
@@ -569,10 +584,6 @@ impl App {
             UiEvent::DragTo { x, y } => self.cat.drag_to(x, y - self.ground),
             UiEvent::Drop => self.cat.release(),
             UiEvent::Stroke(distance) => self.cat.stroke(distance),
-            UiEvent::SetCoat(index) => self.set_coat(index),
-            UiEvent::SetWindowSize(index) => self.set_window_size(index),
-            UiEvent::AddCoatFromPhoto => self.add_coat_from_photo(),
-            UiEvent::RemoveCoat => self.remove_coat(),
             UiEvent::Feed | UiEvent::ReleaseMouse => self.play(event),
             UiEvent::CoughUp => {
                 self.cat.cough_up();

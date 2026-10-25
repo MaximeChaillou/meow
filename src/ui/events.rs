@@ -19,14 +19,6 @@ pub enum UiEvent {
     Drop,
     /// The mouse moved this far over the cat (petting).
     Stroke(f64),
-    /// Index into the themes listed by `Settings::coats`.
-    SetCoat(usize),
-    /// Index into `WindowSize::ALL`.
-    SetWindowSize(usize),
-    /// Make a theme from a photo of the user's cat.
-    AddCoatFromPhoto,
-    /// Remove the custom theme being worn.
-    RemoveCoat,
     /// Put down a bowl of kibble for the cat.
     Feed,
     /// Let a mouse run across the screen for the cat to chase.

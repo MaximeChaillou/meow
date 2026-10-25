@@ -4,14 +4,11 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, sel};
 use objc2_app_kit::{
-    NSApplication, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSMenu,
-    NSMenuItem,
+    NSApplication, NSControlStateValueOn, NSEventModifierFlags, NSMenu, NSMenuItem,
 };
 use objc2_foundation::NSString;
 
 use meow::actions::QuickAction;
-use meow::settings::{Settings, WindowSize};
-use meow::sprites::Coat;
 
 use super::action::Action;
 use super::controller::Controller;
@@ -20,19 +17,55 @@ use super::controller::Controller;
 pub enum MenuEntry {
     /// A greyed-out line of information.
     Label(String),
+    Separator,
     /// Runs `run` when chosen; it should only send to the feature's mailbox.
-    Action { title: String, run: Box<dyn Fn()> },
+    /// `checked` puts a check mark before it.
+    Action {
+        title: String,
+        checked: bool,
+        run: Box<dyn Fn()>,
+    },
+    Submenu {
+        title: String,
+        entries: Vec<MenuEntry>,
+    },
+}
+
+/// Where a feature's entries go in the cat's menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuSection {
+    /// After what the cat does (Feed, Let a Mouse In…).
+    Cat,
+    /// Above "Quit Meow".
+    App,
 }
 
 fn entry_item(mtm: MainThreadMarker, entry: MenuEntry) -> Retained<NSMenuItem> {
     match entry {
         MenuEntry::Label(text) => label(mtm, &text),
-        MenuEntry::Action { title, run } => {
+        MenuEntry::Separator => NSMenuItem::separatorItem(mtm),
+        MenuEntry::Action {
+            title,
+            checked,
+            run,
+        } => {
             let action = Action::new(mtm, run);
             let entry = item(mtm, &title, Action::selector(), "", Some(&action));
             // SAFETY: the item holds its represented object strongly, which keeps
             // the action alive as long as the item; its target alone would not.
             unsafe { entry.setRepresentedObject(Some(&action)) };
+            if checked {
+                entry.setState(NSControlStateValueOn);
+            }
+            entry
+        }
+        MenuEntry::Submenu { title, entries } => {
+            let items: Vec<_> = entries
+                .into_iter()
+                .map(|entry| entry_item(mtm, entry))
+                .collect();
+            let entry = submenu_item(mtm, &menu(mtm, &title, &items));
+            entry.setTitle(&NSString::from_str(&title));
             entry
         }
     }
@@ -130,89 +163,23 @@ pub fn install_main_menu(mtm: MainThreadMarker, controller: &Controller) {
     NSApplication::sharedApplication(mtm).setMainMenu(Some(&bar));
 }
 
-/// Tags the cat menu's hairball item, retitled for Dédé.
-const HAIRBALL_TAG: isize = -1;
-
-/// Fills the theme menu: one item per theme, the worn one checked, the
-/// built-in ones apart from the user's own, then adding one from a photo and
-/// removing the worn one when it is the user's.
-pub fn fill_coat_menu(
-    mtm: MainThreadMarker,
-    menu: &NSMenu,
-    target: &AnyObject,
-    settings: &Settings,
-    adding: bool,
-) {
-    menu.removeAllItems();
-    // Dédé poops where the cats cough up hairballs.
-    let hairball = if settings.coat.is_pig() {
-        "Poop"
-    } else {
-        "Hairball"
-    };
-    // SAFETY: plain getter; the cat's menu lives as long as the app.
-    let parent = unsafe { menu.supermenu() };
-    let sibling = parent
-        .as_deref()
-        .and_then(|parent| parent.itemWithTag(HAIRBALL_TAG));
-    if let Some(entry) = sibling {
-        entry.setTitle(&NSString::from_str(hairball));
-    }
-    let built_in = Coat::ALL.len();
-    for (index, (name, coat)) in settings.coats().into_iter().enumerate() {
-        if index == built_in {
-            menu.addItem(&NSMenuItem::separatorItem(mtm));
-        }
-        let entry = item(mtm, &name, sel!(setCoat:), "", Some(target));
-        entry.setTag(index as isize);
-        let state = if coat == settings.coat {
-            NSControlStateValueOn
-        } else {
-            NSControlStateValueOff
-        };
-        entry.setState(state);
-        menu.addItem(&entry);
-    }
-    menu.addItem(&NSMenuItem::separatorItem(mtm));
-    if adding {
-        menu.addItem(&label(mtm, "Looking at Your Cat…"));
-    } else {
-        menu.addItem(&item(
-            mtm,
-            "Add from Cat Photo…",
-            sel!(addCoatFromPhoto:),
-            "",
-            Some(target),
-        ));
-    }
-    if let Some(custom) = settings.current_custom() {
-        let title = format!("Remove \u{201c}{}\u{201d}", custom.name);
-        menu.addItem(&item(mtm, &title, sel!(removeCoat:), "", Some(target)));
-    }
-    menu.addItem(&NSMenuItem::separatorItem(mtm));
-    menu.addItem(&label(mtm, "Window Size"));
-    for (index, size) in WindowSize::ALL.into_iter().enumerate() {
-        let entry = item(mtm, size.name(), sel!(setWindowSize:), "", Some(target));
-        entry.setTag(index as isize);
-        let state = if size == settings.window_size {
-            NSControlStateValueOn
-        } else {
-            NSControlStateValueOff
-        };
-        entry.setState(state);
-        menu.addItem(&entry);
-    }
+/// The cat's right-click menu, empty until `fill_cat_menu`.
+pub fn cat_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
+    menu(mtm, "Meow", &[])
 }
 
-/// The cat's right-click menu, and its theme submenu to check the coat in later.
-/// The features' entries go above "Quit Meow".
-pub fn cat_menu(
+/// Fills (or refills) the cat's menu: the quick actions, the pages, what the
+/// cat does then the features' `cat` entries, and the features' `app`
+/// entries above "Quit Meow". `pig` names the hairball item for Dédé.
+pub fn fill_cat_menu(
     mtm: MainThreadMarker,
+    cat_menu: &NSMenu,
     controller: &Controller,
     actions: &[QuickAction],
-    settings: &Settings,
-    features: Vec<MenuEntry>,
-) -> (Retained<NSMenu>, Retained<NSMenu>) {
+    cat: Vec<MenuEntry>,
+    app: Vec<MenuEntry>,
+    pig: bool,
+) {
     let target: &AnyObject = controller;
     let mut items: Vec<_> = actions
         .iter()
@@ -226,6 +193,8 @@ pub fn cat_menu(
     if !items.is_empty() {
         items.push(NSMenuItem::separatorItem(mtm));
     }
+    // Dédé poops where the cats cough up hairballs.
+    let hairball = if pig { "Poop" } else { "Hairball" };
     items.extend([
         item(mtm, "Open Chat", sel!(toggleChat:), "", Some(target)),
         item(mtm, "Tasks", sel!(showTasks:), "", Some(target)),
@@ -238,22 +207,16 @@ pub fn cat_menu(
             Some(target),
         ),
         NSMenuItem::separatorItem(mtm),
-    ]);
-    items.extend([
         item(mtm, "Feed", sel!(feed:), "", Some(target)),
         item(mtm, "Let a Mouse In", sel!(releaseMouse:), "", Some(target)),
+        item(mtm, hairball, sel!(coughUp:), "", Some(target)),
     ]);
-    let hairball = item(mtm, "", sel!(coughUp:), "", Some(target));
-    hairball.setTag(HAIRBALL_TAG);
-    items.push(hairball);
-    let coats = menu(mtm, "Theme", &[]);
-    let theme = submenu_item(mtm, &coats);
-    theme.setTitle(&NSString::from_str("Theme"));
-    items.extend([theme, NSMenuItem::separatorItem(mtm)]);
-    items.extend(features.into_iter().map(|entry| entry_item(mtm, entry)));
+    items.extend(cat.into_iter().map(|entry| entry_item(mtm, entry)));
+    items.push(NSMenuItem::separatorItem(mtm));
+    items.extend(app.into_iter().map(|entry| entry_item(mtm, entry)));
     items.push(item(mtm, "Quit Meow", sel!(quit:), "", Some(target)));
-    let cat_menu = menu(mtm, "Meow", &items);
-    // Once in the cat's menu, so it can title the hairball item too.
-    fill_coat_menu(mtm, &coats, target, settings, false);
-    (cat_menu, coats)
+    cat_menu.removeAllItems();
+    for entry in &items {
+        cat_menu.addItem(entry);
+    }
 }

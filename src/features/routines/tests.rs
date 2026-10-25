@@ -5,7 +5,7 @@ use meow::routines::Routines;
 
 use super::{Msg, PAGE_ID, ScheduledTasks};
 use crate::app::feature::Feature;
-use crate::features::fake_host::FakeHost;
+use crate::features::testing::FakeHost;
 
 const STAPLES: &str = "I'll tell you.\n```meow-schedule\n{\"name\": \"Staples\", \"kind\": \
     \"when\", \"condition\": \"Staples replied\", \"then\": \"Tell me\", \

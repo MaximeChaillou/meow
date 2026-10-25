@@ -521,9 +521,7 @@ impl App {
         if !self.settings.autopilot {
             self.autopilot.waiting.clear();
         }
-        if let Some(path) = &self.settings_path
-            && let Err(error) = self.settings.save(path)
-        {
+        if let Err(error) = self.store.set(&self.settings) {
             eprintln!("meow: {error}");
         }
         self.render_autopilot();

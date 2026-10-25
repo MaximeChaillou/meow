@@ -6,13 +6,15 @@
 use meow::activity::Note;
 use meow::claude::ClaudeEnv;
 use meow::conversations::ChatId;
+use meow::settings::Store;
+use meow::sprites::Coat;
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::NSView;
 use objc2_foundation::NSRect;
 
 use super::App;
-use crate::ui::menus::MenuEntry;
+use crate::ui::menus::{self, MenuEntry, MenuSection};
 use crate::ui::notify;
 use crate::ui::sidebar::{Page, PageSpec};
 
@@ -43,9 +45,15 @@ pub(crate) trait Feature {
         text.to_string()
     }
 
-    /// Items for the cat's menu, above "Quit Meow".
+    /// Items for the cat's menu, in `menu_section`. Asked again after the
+    /// feature calls `Host::menu_changed`.
     fn menu(&self) -> Vec<MenuEntry> {
         Vec::new()
+    }
+
+    /// Where `menu`'s items go: above "Quit Meow" unless said otherwise.
+    fn menu_section(&self) -> MenuSection {
+        MenuSection::App
     }
 
     /// The feature's page in the sidebar, if it has one.
@@ -66,6 +74,11 @@ pub(crate) trait Feature {
     fn is_busy(&self) -> bool {
         false
     }
+
+    /// Work the user is waiting on: the cat shows its `…` bubble meanwhile.
+    fn thinking(&self) -> bool {
+        false
+    }
 }
 
 /// What the app offers its features.
@@ -73,12 +86,23 @@ pub(crate) trait Host {
     /// A note in conversation `chat`.
     fn info_in(&mut self, chat: &ChatId, text: &str);
     fn error_in(&mut self, chat: &ChatId, text: &str);
+    /// Shows `!` over the cat until conversation `chat` is seen, unless it is
+    /// on screen already.
+    fn flag_unread(&mut self, chat: &ChatId);
     /// A macOS banner.
     fn notify(&mut self, text: &str);
     /// Something that happened, for the Activity page (with a banner).
     fn record(&mut self, note: Note);
     /// The Claude Code setup, once found; `None` before or without one.
     fn claude(&self) -> Option<&ClaudeEnv>;
+    /// The settings file; a feature reads and saves only its own fields.
+    fn settings(&mut self) -> &mut Store;
+    /// Dresses the cat (and the sidebar's little cat) in `coat`.
+    fn wear(&mut self, coat: Coat);
+    /// The chat bubble's size, in points; it is fitted to the screen.
+    fn resize_chat(&mut self, size: (f64, f64));
+    /// The feature's menu items changed: the cat's menu asks for them again.
+    fn menu_changed(&mut self);
     /// The count shown at the end of `page`'s row in the sidebar.
     fn set_badge(&mut self, page: &'static str, count: usize);
     /// Nothing the user would lose to a restart: no run, no open chat, no
@@ -103,8 +127,28 @@ impl Host for AppHost<'_> {
         self.app.error_in(chat, text);
     }
 
+    fn flag_unread(&mut self, chat: &ChatId) {
+        self.app.flag_unread(chat);
+    }
+
     fn notify(&mut self, text: &str) {
         notify::post("Meow", text);
+    }
+
+    fn settings(&mut self) -> &mut Store {
+        &mut self.app.store
+    }
+
+    fn wear(&mut self, coat: Coat) {
+        self.app.wear(coat);
+    }
+
+    fn resize_chat(&mut self, size: (f64, f64)) {
+        self.app.chat.set_size(size);
+    }
+
+    fn menu_changed(&mut self) {
+        self.app.menu_changed = true;
     }
 
     fn record(&mut self, note: Note) {
@@ -144,6 +188,51 @@ impl App {
             });
         }
         self.features = features;
+        if std::mem::take(&mut self.menu_changed) {
+            self.fill_cat_menu();
+        }
+    }
+
+    /// Fills the cat's menu with the features' items as they are now.
+    pub(super) fn fill_cat_menu(&self) {
+        let entries = |section| {
+            self.features
+                .iter()
+                .filter(|f| f.menu_section() == section)
+                .flat_map(|f| f.menu())
+                .collect()
+        };
+        menus::fill_cat_menu(
+            self.mtm,
+            &self.cat_menu,
+            &self.controller,
+            &self.actions,
+            entries(MenuSection::Cat),
+            entries(MenuSection::App),
+            self.coat.is_pig(),
+        );
+    }
+
+    /// Whether a feature is doing something the user waits on.
+    pub(super) fn features_thinking(&self) -> bool {
+        self.features.iter().any(|f| f.thinking())
+    }
+
+    /// Dresses the cat in `coat`; the hairball item becomes Poop for Dédé.
+    fn wear(&mut self, coat: Coat) {
+        self.coat = coat;
+        self.cat.set_pig(coat.is_pig());
+        self.chat.set_coat(coat);
+        // Redraw now, even if the cat holds still.
+        self.last_look = None;
+        self.menu_changed = true;
+    }
+
+    fn flag_unread(&mut self, chat: &ChatId) {
+        if !(self.chat.is_visible() && self.conversations.active() == chat) {
+            self.unread = true;
+            self.unread_chat = chat.clone();
+        }
     }
 
     /// Whether a feature takes the command `text` typed in conversation `chat`.

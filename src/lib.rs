@@ -4,6 +4,7 @@ pub mod activity;
 pub mod agenda;
 pub mod agent;
 pub mod agent_run;
+pub mod appearance;
 pub mod autopilot;
 pub mod behavior;
 pub mod cat_photo;

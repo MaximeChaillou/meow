@@ -197,9 +197,7 @@ impl App {
             write_as_me: on,
             ..self.settings.clone()
         };
-        if let Some(path) = &self.settings_path
-            && let Err(error) = self.settings.save(path)
-        {
+        if let Err(error) = self.store.set(&self.settings) {
             eprintln!("meow: {error}");
         }
     }
