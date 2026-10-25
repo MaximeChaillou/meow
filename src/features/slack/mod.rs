@@ -255,6 +255,8 @@ impl Feature for Slack {
                 true
             }
             Link::Autopilot => {
+                // Its page is drawn again, as `page_shown` would.
+                self.autopilot_dirty = true;
                 host.open_page(Page::Feature(autopilot_page::PAGE_ID));
                 true
             }

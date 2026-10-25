@@ -97,6 +97,9 @@ struct App {
     cat_menu: Retained<NSMenu>,
     /// A feature changed its menu items: the cat's menu is filled again.
     menu_changed: bool,
+    /// A feature asked to quit, done once the features are back (see
+    /// `feature::after_features`).
+    quitting: bool,
     /// What the cat wears, as the appearance feature says.
     coat: Coat,
     cat: Cat,
@@ -223,6 +226,7 @@ pub fn start(mtm: MainThreadMarker) {
         store,
         cat_menu,
         menu_changed: false,
+        quitting: false,
         // Dressed by the appearance feature at the first tick, before drawing.
         coat: Coat::default(),
         cat: Cat::new(start_x),

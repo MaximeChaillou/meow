@@ -378,6 +378,5 @@ fn start_run(
 
 /// Claude, once discovered, or why it cannot run.
 pub(super) fn claude_env(host: &dyn Host) -> Result<&ClaudeEnv, String> {
-    host.claude()
-        .ok_or_else(|| "Claude is not available yet; try again in a moment.".to_string())
+    host.claude_or_why()
 }

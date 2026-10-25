@@ -155,6 +155,11 @@ pub(crate) trait Host {
     fn agents_revision(&self) -> u64;
     /// The Claude Code setup, once found; `None` before or without one.
     fn claude(&self) -> Option<&ClaudeEnv>;
+    /// The Claude Code setup, or why there is none, to tell the user.
+    fn claude_or_why(&self) -> Result<&ClaudeEnv, String> {
+        self.claude()
+            .ok_or_else(|| "Claude is still starting; try again in a moment.".to_string())
+    }
     /// The calendar tools of the user's Claude Code, once found.
     fn calendar_tools(&self) -> Option<&CalendarTools>;
     /// The quick actions, as configured.
@@ -341,6 +346,17 @@ impl Host for AppHost<'_> {
         self.app.claude.as_ref()?.as_ref().ok()
     }
 
+    fn claude_or_why(&self) -> Result<&ClaudeEnv, String> {
+        if self.app.snapshot.is_some() {
+            return Err("Snapshots do not run Claude.".to_string());
+        }
+        match &self.app.claude {
+            Some(Ok(env)) => Ok(env),
+            Some(Err(error)) => Err(format!("Claude is not available: {error}")),
+            None => Err("Claude is still starting; try again in a moment.".to_string()),
+        }
+    }
+
     fn set_badge(&mut self, page: &'static str, count: usize) {
         self.app.chat.set_badge(page, count);
     }
@@ -349,8 +365,9 @@ impl Host for AppHost<'_> {
         !self.others_busy && self.app.is_idle()
     }
 
+    /// Done once the features are back in the app, so each can save first.
     fn quit(&mut self) {
-        self.app.quit();
+        self.app.quitting = true;
     }
 }
 
@@ -372,8 +389,16 @@ impl App {
             });
         }
         self.features = features;
+        self.after_features();
+    }
+
+    /// What features asked for while they were out of `self`.
+    fn after_features(&mut self) {
         if std::mem::take(&mut self.menu_changed) {
             self.fill_cat_menu();
+        }
+        if std::mem::take(&mut self.quitting) {
+            self.quit();
         }
     }
 
@@ -469,9 +494,7 @@ impl App {
             each(feature.as_mut(), &mut host)
         });
         self.features = features;
-        if std::mem::take(&mut self.menu_changed) {
-            self.fill_cat_menu();
-        }
+        self.after_features();
         done
     }
 
