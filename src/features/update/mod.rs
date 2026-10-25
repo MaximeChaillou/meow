@@ -225,6 +225,7 @@ impl Feature for Update {
             MenuEntry::Label(version_label()),
             MenuEntry::Action {
                 title: "Check for Updates".to_string(),
+                checked: false,
                 run: Box::new(move || inbox.send(Msg::Check(Asked::Banner))),
             },
         ]

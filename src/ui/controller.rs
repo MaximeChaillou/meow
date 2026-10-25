@@ -47,31 +47,6 @@ define_class!(
             }
         }
 
-        /// Theme menu items: the sender's tag is the coat index.
-        #[unsafe(method(setWindowSize:))]
-        fn set_window_size(&self, sender: Option<&AnyObject>) {
-            if let Some(index) = sender_tag(sender) {
-                push(UiEvent::SetWindowSize(index));
-            }
-        }
-
-        #[unsafe(method(setCoat:))]
-        fn set_coat(&self, sender: Option<&AnyObject>) {
-            if let Some(index) = sender_tag(sender) {
-                push(UiEvent::SetCoat(index));
-            }
-        }
-
-        #[unsafe(method(addCoatFromPhoto:))]
-        fn add_coat_from_photo(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::AddCoatFromPhoto);
-        }
-
-        #[unsafe(method(removeCoat:))]
-        fn remove_coat(&self, _sender: Option<&AnyObject>) {
-            push(UiEvent::RemoveCoat);
-        }
-
         #[unsafe(method(feed:))]
         fn feed(&self, _sender: Option<&AnyObject>) {
             push(UiEvent::Feed);

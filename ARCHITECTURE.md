@@ -24,7 +24,8 @@ src/
     mailbox.rs        a feature's own message queue
   features/           one folder per feature (the app side of it)
     mod.rs            the registry: `mod x;` and one entry in `all()`
-    fake_host.rs      the `Host` feature tests use
+    testing.rs        what feature tests share: a fake `Host`, menu helpers
+    appearance/       mod.rs, tests.rs
     routines/         mod.rs (state, messages, `impl Feature`), page.rs, tests.rs
     update/           mod.rs, tests.rs
   ui/                 AppKit building blocks: windows, pages, widgets, menus
@@ -39,8 +40,12 @@ A feature lives in `src/features/<name>/` and owns:
 - **its state**: a struct implementing `Feature`, never a field on `App`;
 - **its messages**: a private `enum Msg`, sent through its `Mailbox<Msg>` by
   its menu items, buttons and commands, and drained in `poll`;
-- **its UI wiring**: menu items as `MenuEntry` values whose closures send to
-  the mailbox (`ui::action::Action` does the same for buttons);
+- **its UI wiring**: menu items as `MenuEntry` values (actions, check marks,
+  labels, separators, submenus) whose closures send to the mailbox
+  (`ui::action::Action` does the same for buttons);
+- **its settings**: its own `#[serde(default)]` struct, read with
+  `Store::get` and saved with `Store::set`, which leaves the other owners'
+  fields alone (`settings.json` stays one flat file);
 - **its page**, if any: a `PageSpec` (sidebar row, header, count chip) and the
   view it builds and draws itself (`features/routines/page.rs`);
 - **its part in the chat**: `/name` commands, text added to each chat prompt,
@@ -60,17 +65,21 @@ pub(crate) trait Feature {
     fn chat_instruction(&self, now: u64) -> Option<String>;            // into chat prompts
     fn read_reply(&mut self, chat: &ChatId, text: &str, done: bool) -> String; // its blocks out
     fn menu(&self) -> Vec<MenuEntry>;                    // cat's menu items
+    fn menu_section(&self) -> MenuSection;               // with the cat's, or above Quit
     fn page(&self) -> Option<PageSpec>;                  // sidebar row
     fn build_page(&mut self, mtm, frame) -> Option<Retained<NSView>>;  // once, at launch
     fn page_shown(&mut self);                            // about to be shown
     fn is_busy(&self) -> bool;                           // a restart would lose work
+    fn thinking(&self) -> bool;                          // the cat shows `…`
 }
 ```
 
 Every method but `poll` has a default, so a feature implements only what it
 uses. A feature reaches the rest of the app only through `Host`: write in a
-conversation, post a banner, record an Activity item, get the Claude setup,
-set its sidebar count, ask whether the app is idle, quit. When a feature needs
+conversation (and flag it with `!` over the cat), post a banner, record an
+Activity item, get the Claude setup, read and save its settings, dress the
+cat, size the chat bubble, have its menu items asked for again, set its
+sidebar count, ask whether the app is idle, quit. When a feature needs
 something new from the app, add one method to `Host` rather than handing out
 `App`. Features do not call each other.
 
@@ -86,8 +95,8 @@ its own (`#[path = "../src/ui/mod.rs"]`).
 
 1. `src/features/<name>/mod.rs`: the struct, `enum Msg`, a `Mailbox<Msg>`,
    `impl Feature`. Copy `features/update` as a starting point.
-2. `src/features/<name>/tests.rs`: drive it through `command`, menu closures
-   and `poll` with a fake `Host`.
+2. `src/features/<name>/tests.rs`: drive it through `command`, its menu
+   (`testing::click`, `testing::describe`) and `poll`, with `testing::FakeHost`.
 3. `src/features/mod.rs`: `mod <name>;` and one line in `all()`, in
    alphabetical order.
 4. `docs/features/<name>.md`, and one link in the README's list, in
@@ -108,12 +117,13 @@ exists to retire.
 
 ## Migration status
 
-Moved to `src/features/`: `update`, `routines`. The rest still live in
+Moved to `src/features/`: `update`, `routines`, `appearance` (the coat and
+the window size, from `app/coat.rs`). The rest still live in
 `src/app/*.rs` as `impl App` blocks, with fields on `App`, `UiEvent` variants
 and `Controller` methods. Move them one PR each, roughly from the least to the
 most entangled:
 
-1. `coat`, `agents`
+1. `agents`
 2. `autopilot`
 3. `plan`, `agenda`, `rsvp`, `schedule`, `quick_actions`
 4. `tasks`, `sync`, `task_actions`
@@ -124,11 +134,13 @@ most entangled:
 its items open other pages, and it drives the news bubble over the cat.
 Features write to it with `Host::record`; it stays in `src/app/activity.rs`.
 
-Still to build, each with the first feature that needs it: settings stored as
-one section per feature (in place of one `Settings` struct, for `coat` and
-`autopilot`), and a way for a feature to open another page (for `autopilot`'s
-links). Once the app's own pages move too, `Page` and `Selection` keep only
-`Feature`.
+`settings::Settings` keeps only the fields of code not moved yet
+(`write_as_me` for Slack, `autopilot`); each moves into its feature's own
+struct with it.
+
+Still to build, with the first feature that needs it: a way for a feature to
+open another page (for `autopilot`'s links). Once the app's own pages move
+too, `Page` and `Selection` keep only `Feature`.
 
 ## Module map (library and not yet moved code)
 
@@ -136,6 +148,8 @@ links). Once the app's own pages move too, `Page` and `Selection` keep only
 |----------------------------|-----------------------------------------------------------|
 | `src/sprites.rs`           | Pixel art as text grids, composed into RGB frames         |
 | `src/cat_photo.rs`         | Themes from a cat photo: shrinking it, the prompt, reading the colors |
+| `src/appearance.rs`        | The coat worn, themes from photos, the bubble's size      |
+| `src/settings.rs`          | `settings.json`, each owner reading and saving its own fields |
 | `src/behavior.rs`          | Cat state machine (walk, sleep, held, falling with gravity) |
 | `src/actions.rs`           | Quick actions: defaults and `actions.json` loading        |
 | `src/tasks.rs`             | Task list: merge, done state, persistence, `meow-tasks` parsing |
