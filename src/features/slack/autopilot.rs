@@ -300,8 +300,7 @@ impl Slack {
         let Some(job) = self.autopilot.jobs.next_queued().cloned() else {
             return;
         };
-        let wants_code = job.repo.is_some() || job.pr.is_some();
-        if wants_code && job.folder.is_none() {
+        if job.needs_folder() {
             self.prepare_folder(&job, host);
         } else {
             self.start_work(job.id, host);
@@ -343,15 +342,14 @@ impl Slack {
             Err(TryRecvError::Disconnected) => Err("making the worktree stopped early".into()),
         };
         self.autopilot.preparing = None;
-        match outcome {
-            Ok(folder) => {
-                if let Some(job) = self.autopilot.jobs.get_mut(id) {
-                    job.folder = Some(folder);
-                }
-                self.start_work(id, host);
+        // Without a worktree the work still runs: a review or an answer needs none.
+        if let Some(job) = self.autopilot.jobs.get_mut(id) {
+            match outcome {
+                Ok(folder) => job.folder = Some(folder),
+                Err(error) => job.folder_error = Some(error),
             }
-            Err(error) => self.job_ended(id, Err(error), host),
         }
+        self.start_work(id, host);
     }
 
     /// Where job `id` keeps its held calls, and where it runs.

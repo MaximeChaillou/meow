@@ -121,6 +121,9 @@ pub struct Job {
     pub stage: Stage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<Folder>,
+    /// Why no worktree could be made: the work then runs without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_error: Option<String>,
     /// The Claude session, resumed to make approved calls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
@@ -153,6 +156,13 @@ impl Job {
                 ActionState::Pending | ActionState::Approved | ActionState::Running
             )
         })
+    }
+
+    /// Whether a worktree is still to be made before the work starts.
+    pub fn needs_folder(&self) -> bool {
+        (self.repo.is_some() || self.pr.is_some())
+            && self.folder.is_none()
+            && self.folder_error.is_none()
     }
 
     /// The run's working folder, with the default when the job has none.
@@ -211,6 +221,7 @@ impl Jobs {
             created_at: now,
             stage: Stage::Queued,
             folder: None,
+            folder_error: None,
             session: None,
             summary: None,
             actions: Vec::new(),
@@ -383,8 +394,9 @@ If there is no work, reply with the single word `none`. Otherwise reply only wit
 block with the info string `{PLAN_FENCE}` holding one JSON object: {{\"title\": 3 to 8 words, \
 \"prompt\": the agent's prompt, self-contained (it sees nothing else): who asked what, the exact \
 details (links, PR numbers, branch names, error messages), what done looks like, in English; \
-\"repo\": the GitHub repository as owner/name when the work is in code and you can tell it, \
-else null; \"pr\": the pull request's URL or number when there is one, else null; \"branch\": \
+\"repo\": the GitHub repository as owner/name when the work is in code and you can tell it \
+(from a link, or a repository named in the conversation), else null; \"pr\": the pull request's \
+URL when the conversation links it, else its number, else null; \"branch\": \
 the branch to work on when named and there is no pull request, else null}}."
     )
 }
@@ -429,7 +441,15 @@ rewrote history): run it at the end.",
                 remote = folder.remote,
             )
         }
-        None => String::new(),
+        None => match &job.folder_error {
+            Some(error) => format!(
+                "\n\nMeow could not make a git worktree for this work ({error}), so you are in \
+an empty folder that is not a git repository. Find the repository from the request, and name it \
+in every `gh` command (`--repo owner/name`). If you need the code, read it with `gh`, or clone \
+it into this folder."
+            ),
+            None => String::new(),
+        },
     };
     format!(
         "{prompt}{place}\n\n---\n\
@@ -650,6 +670,21 @@ mod tests {
         let (what, detail) = describe(&send);
         assert_eq!(what, "Slack: send message");
         assert_eq!(detail, "{\"channel_id\":\"D1\"}\nC'est réglé, je push.");
+    }
+
+    #[test]
+    fn jobs_without_a_worktree_still_run_and_say_why() {
+        let mut jobs = Jobs::default();
+        jobs.add(plan(), origin("1"), 0);
+        let job = jobs.get_mut(1).unwrap();
+        assert!(job.needs_folder());
+        assert!(!work_prompt(job, "Axel").contains("could not make a git worktree"));
+
+        job.folder_error = Some("No clone of o/r found".into());
+        assert!(!job.needs_folder());
+        let prompt = work_prompt(job, "Axel");
+        assert!(prompt.contains("could not make a git worktree for this work (No clone of o/r"));
+        assert!(prompt.contains("--repo owner/name"));
     }
 
     #[test]

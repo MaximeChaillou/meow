@@ -141,6 +141,21 @@ fn parse_pull_request(json: &str) -> Result<PullRequest, String> {
     })
 }
 
+/// The repositories, from `gh search prs`, holding a pull request numbered `number`.
+fn repos_numbered(json: &str, number: &str) -> Result<Vec<String>, String> {
+    let found: Vec<Value> =
+        serde_json::from_str(json).map_err(|e| format!("Unexpected answer from gh: {e}"))?;
+    Ok(found
+        .iter()
+        .filter(|pr| pr.get("number").map(Value::to_string).as_deref() == Some(number))
+        .filter_map(|pr| {
+            pr.pointer("/repository/nameWithOwner")
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string)
+        .collect())
+}
+
 /// The commands a worktree is made with.
 pub struct Tools {
     /// PATH for `git` and `gh`.
@@ -149,17 +164,59 @@ pub struct Tools {
 }
 
 impl Tools {
-    /// `pr` (URL or number) of `repo`.
+    /// `pr` (URL or number) of `repo`. Without `repo`, a number is looked for
+    /// among the user's open pull requests: Meow runs outside any clone, so
+    /// `gh` cannot tell the repository from the folder.
     pub fn pull_request(&self, pr: &str, repo: Option<&str>) -> Result<PullRequest, String> {
+        let pr = pr.trim().trim_start_matches('#');
+        let repo = match repo {
+            _ if pr.contains("github.com") => None,
+            Some(repo) => Some(repo.to_string()),
+            None => Some(self.repo_of(pr)?),
+        };
         let mut args = vec!["pr", "view", pr];
-        if let Some(repo) = repo.filter(|_| !pr.contains("github.com")) {
-            args.extend(["--repo", repo]);
+        if let Some(repo) = &repo {
+            args.extend(["--repo", repo.as_str()]);
         }
         args.extend([
             "--json",
             "headRefName,baseRefName,headRepository,headRepositoryOwner,url",
         ]);
         parse_pull_request(&self.run("gh", None, &args)?)
+    }
+
+    /// The repository of the open pull request `number` the user wrote, is
+    /// involved in, or is asked to review.
+    fn repo_of(&self, number: &str) -> Result<String, String> {
+        let mut repos = Vec::new();
+        for who in ["--involves=@me", "--review-requested=@me"] {
+            let json = self.run(
+                "gh",
+                None,
+                &[
+                    "search",
+                    "prs",
+                    who,
+                    "--state=open",
+                    "--limit=100",
+                    "--json=number,repository",
+                ],
+            )?;
+            repos.extend(repos_numbered(&json, number)?);
+        }
+        repos.sort();
+        repos.dedup();
+        match repos.as_slice() {
+            [repo] => Ok(repo.clone()),
+            [] => Err(format!(
+                "No repository was named for pull request #{number}, and none of your open \
+                 pull requests has that number."
+            )),
+            _ => Err(format!(
+                "No repository was named for pull request #{number}, and it could be in {}.",
+                repos.join(", ")
+            )),
+        }
     }
 
     /// A worktree at `dest` for the pull request `pr`, or `branch` of `repo`
@@ -312,6 +369,21 @@ mod tests {
                 url: "https://github.com/axel/meow/pull/12".into(),
             }
         );
+    }
+
+    #[test]
+    fn pull_request_numbers_name_their_repositories() {
+        let json = r#"[
+            {"number":1727,"repository":{"name":"api","nameWithOwner":"o/api"}},
+            {"number":17,"repository":{"name":"web","nameWithOwner":"o/web"}},
+            {"number":1727,"repository":{"name":"app","nameWithOwner":"o/app"}}]"#;
+        assert_eq!(
+            repos_numbered(json, "1727").unwrap(),
+            vec!["o/api", "o/app"]
+        );
+        assert_eq!(repos_numbered(json, "17").unwrap(), vec!["o/web"]);
+        assert!(repos_numbered(json, "42").unwrap().is_empty());
+        assert!(repos_numbered("oops", "1").is_err());
     }
 
     #[test]

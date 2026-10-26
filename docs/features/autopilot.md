@@ -18,7 +18,10 @@ on the page (it is off by default).
   worktree of your clone, at the tip of the PR's branch (found with `gh`, the
   clone found under `~/Developer` and the usual folders, or `MEOW_CODE_DIRS`),
   never in your own checkout. The agent merges, edits, builds, tests and
-  commits there.
+  commits there. A PR given by number alone ("PR #1727") is looked up among
+  your open PRs and the ones you are asked to review. When no worktree can be
+  made (no clone, the repository unknown), the work still runs, in an empty
+  folder, and the agent is told why and to name the repository to `gh`.
 - **Nothing irreversible without you:** every tool call goes through Meow's
   guard (the app's binary as a Claude Code `PreToolUse` hook, `meow --guard`).
   Reading, searching, and editing files inside the job's folder go through.
