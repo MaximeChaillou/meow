@@ -36,6 +36,13 @@ on the page (it is off by default).
   one call, with that exact input, once. Results land in Activity, and the
   sidebar shows how many jobs wait for you.
 
+- **Feedback:** type how Autopilot should work in the box at the bottom of the
+  page, e.g. "Open the PR only, don't message on Slack", and press Return or
+  **Save**. Feedback is listed at the top of the page (`×` forgets it) and
+  every job from then on follows it, in the triage and in the work, along with
+  `~/.config/meow/autopilot.md`. Actions already waiting are left as they are:
+  reject the ones you don't want.
+
 `×` removes a job and its worktree; **Open folder** shows the worktree in
 Finder. Jobs are saved in `~/Library/Application Support/Meow/autopilot.json`,
 their worktrees under `…/Meow/autopilot/<id>/work`, and finished ones go after

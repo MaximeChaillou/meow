@@ -49,6 +49,26 @@ fn esc_away_from_the_slack_page_is_left_to_the_app() {
 }
 
 #[test]
+fn autopilot_feedback_is_saved_and_can_be_removed() {
+    let mut feature = slack();
+    let mut host = FakeHost::default();
+    feature.add_autopilot_feedback("Only open the PR,\n no Slack message", &mut host);
+    feature.add_autopilot_feedback("Answer in French", &mut host);
+    feature.add_autopilot_feedback("   ", &mut host);
+    let saved: SlackSettings = host.settings.get().unwrap();
+    assert_eq!(
+        saved.autopilot_feedback,
+        ["Only open the PR, no Slack message", "Answer in French"]
+    );
+
+    feature.remove_autopilot_feedback(0, &mut host);
+    feature.remove_autopilot_feedback(5, &mut host);
+    let saved: SlackSettings = host.settings.get().unwrap();
+    assert_eq!(saved.autopilot_feedback, ["Answer in French"]);
+    assert_eq!(feature.settings, saved);
+}
+
+#[test]
 fn unreadable_settings_are_told_at_launch() {
     let feature = Slack::signed_out(Err("Could not read settings".to_string()));
     assert_eq!(

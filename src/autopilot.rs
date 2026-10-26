@@ -20,6 +20,8 @@ pub const KEEP_SECS: u64 = 7 * 24 * 60 * 60;
 const MAX_TEXT_CHARS: usize = 2000;
 const MAX_SUMMARY_CHARS: usize = 4000;
 const MAX_JOBS: usize = 50;
+/// Longest a piece of feedback is kept.
+const MAX_FEEDBACK_CHARS: usize = 500;
 
 /// What the triage found to prepare.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -373,6 +375,29 @@ pub fn user_rules() -> Option<String> {
     Some(text.trim().to_string()).filter(|t| !t.is_empty())
 }
 
+/// `feedback` with `text` added at the end, on one line: unchanged when
+/// `text` is blank or already there.
+pub fn add_feedback(feedback: &[String], text: &str) -> Vec<String> {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let line = clip(&line, MAX_FEEDBACK_CHARS);
+    let mut all = feedback.to_vec();
+    if !line.is_empty() && !feedback.contains(&line) {
+        all.push(line);
+    }
+    all
+}
+
+/// What the triage and the work follow besides their own instructions: the
+/// user's rules file, then each piece of feedback given on the Autopilot page.
+pub fn rules(own: Option<&str>, feedback: &[String]) -> Option<String> {
+    let lines: Vec<String> = own
+        .map(str::to_string)
+        .into_iter()
+        .chain(feedback.iter().map(|f| format!("- {f}")))
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
 /// The triage request: is there work in what `from` just wrote to `me`?
 /// `conversation` is the recent messages, oldest first, as `Name: text`.
 pub fn triage_prompt(me: &str, from: &str, conversation: &str, rules: Option<&str>) -> String {
@@ -417,9 +442,9 @@ pub fn parse_plan(answer: &str) -> Option<Plan> {
     (!plan.title.is_empty() && !plan.prompt.is_empty()).then_some(plan)
 }
 
-/// What the run starts with: the plan, where it works, and how irreversible
-/// actions are handled.
-pub fn work_prompt(job: &Job, me: &str) -> String {
+/// What the run starts with: the plan, where it works, how irreversible
+/// actions are handled, and the user's `rules` (see [`rules`]).
+pub fn work_prompt(job: &Job, me: &str, rules: Option<&str>) -> String {
     let place = match &job.folder {
         Some(folder) => {
             let pr = folder
@@ -451,6 +476,14 @@ it into this folder."
             None => String::new(),
         },
     };
+    let rules = rules
+        .map(|r| {
+            format!(
+                "\n\n{me}'s rules and feedback on earlier work, which win over the instructions \
+above:\n{r}"
+            )
+        })
+        .unwrap_or_default();
     format!(
         "{prompt}{place}\n\n---\n\
 You work for {me}, who is busy: nobody watches this session, so make reasonable choices instead \
@@ -461,7 +494,7 @@ a comment, changing a Linear issue or a pull request) is held by Meow for {me}'s
 the call exactly as you would if it were allowed, with its final content (for a reply, the \
 message itself, in {me}'s voice and the conversation's language), and it will wait for {me} \
 to approve it. Do not try to reach the same result another way. When a reply to {from} would \
-help, prepare it that way too.\n\n\
+help, prepare it that way too.{rules}\n\n\
 End with a short summary for {me}, in the language of the request: what you did, and what is \
 waiting for approval.",
         prompt = job.plan_prompt,
@@ -647,7 +680,7 @@ mod tests {
             base: Some("main".into()),
             pr_url: Some("https://github.com/o/r/pull/12".into()),
         });
-        let prompt = work_prompt(job, "Cyril");
+        let prompt = work_prompt(job, "Cyril", None);
         assert!(prompt.starts_with("Resolve the merge conflicts"));
         assert!(prompt.contains("`git push fork HEAD:feat/x`"), "{prompt}");
         assert!(prompt.contains("merges into `main`"));
@@ -678,13 +711,58 @@ mod tests {
         jobs.add(plan(), origin("1"), 0);
         let job = jobs.get_mut(1).unwrap();
         assert!(job.needs_folder());
-        assert!(!work_prompt(job, "Axel").contains("could not make a git worktree"));
+        assert!(!work_prompt(job, "Axel", None).contains("could not make a git worktree"));
 
         job.folder_error = Some("No clone of o/r found".into());
         assert!(!job.needs_folder());
-        let prompt = work_prompt(job, "Axel");
+        let prompt = work_prompt(job, "Axel", None);
         assert!(prompt.contains("could not make a git worktree for this work (No clone of o/r"));
         assert!(prompt.contains("--repo owner/name"));
+    }
+
+    #[test]
+    fn feedback_is_kept_once_on_one_line() {
+        let feedback = add_feedback(&[], "  Open the PR,\n\ndon't   message on Slack. ");
+        assert_eq!(feedback, ["Open the PR, don't message on Slack."]);
+        assert_eq!(add_feedback(&feedback, "   \n"), feedback);
+        assert_eq!(
+            add_feedback(&feedback, "Open the PR, don't message on Slack."),
+            feedback
+        );
+        let long = add_feedback(&[], &"a".repeat(MAX_FEEDBACK_CHARS + 10));
+        assert_eq!(long[0].chars().count(), MAX_FEEDBACK_CHARS + 1);
+    }
+
+    #[test]
+    fn rules_join_the_users_file_and_feedback() {
+        assert_eq!(rules(None, &[]), None);
+        assert_eq!(
+            rules(Some("Only for messages from Axel"), &[]).as_deref(),
+            Some("Only for messages from Axel")
+        );
+        let feedback = ["Only the PR, no Slack message".to_string()];
+        assert_eq!(
+            rules(None, &feedback).as_deref(),
+            Some("- Only the PR, no Slack message")
+        );
+        assert_eq!(
+            rules(Some("Only for Axel"), &feedback).as_deref(),
+            Some("Only for Axel\n- Only the PR, no Slack message")
+        );
+    }
+
+    #[test]
+    fn the_work_prompt_follows_the_users_rules() {
+        let mut jobs = Jobs::default();
+        let id = jobs.add(plan(), origin("1"), 0).id;
+        let job = jobs.get(id).unwrap();
+        assert!(!work_prompt(job, "Axel", None).contains("Axel's rules"));
+        let prompt = work_prompt(job, "Axel", Some("- Only the PR, no Slack message"));
+        assert!(
+            prompt.contains("Axel's rules and feedback on earlier work, which win over"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("- Only the PR, no Slack message\n\nEnd with a short summary"));
     }
 
     #[test]

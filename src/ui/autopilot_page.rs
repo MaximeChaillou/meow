@@ -1,11 +1,13 @@
 //! The Autopilot page: work Meow started by itself from Slack messages, newest
 //! first. Each card says who asked what, how the work went, and lists the
 //! actions that wait for the user (a push, a reply…) with Approve and Reject.
+//! Feedback typed at the bottom is kept and followed by every later job.
 
 use std::cell::RefCell;
 
 use meow::autopilot::{self, Action, ActionState, Job, Jobs, Stage};
 use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSColor, NSScrollView, NSTextAlignment, NSTextField, NSView,
@@ -14,6 +16,7 @@ use objc2_foundation::{NSAttributedString, NSPoint, NSRect, NSSize, NSString};
 
 use super::action::{Action as Target, ActionSink};
 use super::bubble;
+use super::controller::Controller;
 use super::flipped::FlippedView;
 use super::rich_text::{self, Attributes};
 use super::theme;
@@ -30,9 +33,11 @@ const BUTTON_WIDTH: f64 = 82.0;
 const BUTTON_GAP: f64 = 6.0;
 const FOLDER_WIDTH: f64 = 110.0;
 const TOGGLE_WIDTH: f64 = 110.0;
+const SAVE_WIDTH: f64 = 76.0;
 const INDENT: f64 = 6.0;
 const ACTION_INSET: f64 = 14.0;
 const WAITING_BORDER: f64 = 2.0;
+const FEEDBACK_HINT: &str = "Feedback for Autopilot, e.g. \"open the PR, don't message on Slack\"";
 /// Longest a held call's details are shown.
 const MAX_DETAIL_CHARS: usize = 700;
 /// Held actions are named `job row * TAG_STRIDE + action index`.
@@ -53,22 +58,32 @@ pub enum AutopilotAction {
     Dismiss(usize),
     /// Show the worktree of the job in this row.
     OpenFolder(usize),
+    /// Keep the feedback typed at the bottom.
+    Feedback,
+    /// Forget the feedback at this index.
+    RemoveFeedback(usize),
 }
 
 pub struct AutopilotPage {
     pub view: Retained<NSView>,
     scroll: Retained<NSScrollView>,
     list: Retained<FlippedView>,
-    /// The targets of the page's controls, all drawn again with it.
+    input: Retained<widgets::GrowingField>,
+    /// The targets of the list's controls, all drawn again with it.
     actions: ActionSink<AutopilotAction>,
+    /// The targets of the feedback field and its button, kept for them.
+    _fixed: ActionSink<AutopilotAction>,
     /// Job ids in the order shown; buttons carry an index into it.
     shown_ids: RefCell<Vec<u64>>,
     mtm: MainThreadMarker,
 }
 
 impl AutopilotPage {
+    /// The page, its controls reporting to `on_action`; `controller` handles
+    /// the feedback field's keys.
     pub fn new(
         mtm: MainThreadMarker,
+        controller: &Retained<Controller>,
         frame: NSRect,
         on_action: impl Fn(AutopilotAction) + 'static,
     ) -> Self {
@@ -78,9 +93,47 @@ impl AutopilotPage {
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
         let (width, height) = (frame.size.width - bubble::PADDING, frame.size.height);
+        let fixed = ActionSink::new(mtm, on_action);
+
+        let input = widgets::text_field(mtm, FEEDBACK_HINT);
+        let save_target = fixed.target(AutopilotAction::Feedback);
+        // SAFETY: the page keeps the target, and the controller lives as long
+        // as the app, so the weak target and delegate stay valid.
+        unsafe {
+            input.setTarget(Some(&save_target));
+            input.setAction(Some(Target::selector()));
+            input.setDelegate(Some(ProtocolObject::from_ref(&**controller)));
+        }
+        // Saved on Return only, not when the field merely loses focus.
+        if let Some(cell) = input.cell() {
+            cell.setSendsActionOnEndEditing(false);
+        }
+        let save = widgets::text_button(
+            mtm,
+            "Save",
+            widgets::ButtonStyle::Accent,
+            &save_target,
+            Target::selector(),
+        );
+        save.setToolTip(Some(&NSString::from_str(
+            "Every job from now on follows this feedback",
+        )));
+        let bottom = widgets::composer(
+            mtm,
+            &view,
+            &input,
+            &[],
+            &[(&save, SAVE_WIDTH, widgets::ButtonStyle::Accent)],
+        ) + 0.5 * MARGIN;
+
         let scroll = NSScrollView::initWithFrame(
             NSScrollView::alloc(mtm),
-            rect(MARGIN, MARGIN, width - 2.0 * MARGIN, height - 1.5 * MARGIN),
+            rect(
+                MARGIN,
+                bottom,
+                width - 2.0 * MARGIN,
+                height - bottom - 0.5 * MARGIN,
+            ),
         );
         scroll.setHasVerticalScroller(true);
         scroll.setDrawsBackground(false);
@@ -92,11 +145,14 @@ impl AutopilotPage {
         list.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
         scroll.setDocumentView(Some(&list));
         view.addSubview(&scroll);
+        input.keep_clear(&scroll);
         Self {
             view,
             scroll,
             list,
-            actions: ActionSink::new(mtm, on_action),
+            input,
+            actions: fixed.sibling(),
+            _fixed: fixed,
             shown_ids: RefCell::new(Vec::new()),
             mtm,
         }
@@ -107,14 +163,22 @@ impl AutopilotPage {
         self.shown_ids.borrow().get(index).copied()
     }
 
-    /// Draws the switch, then the jobs.
-    pub fn render(&self, jobs: &Jobs, enabled: bool, now: u64) {
+    /// The feedback typed, emptying the field.
+    pub fn take_feedback(&self) -> String {
+        let text = self.input.stringValue().to_string();
+        self.input.set_text("");
+        text
+    }
+
+    /// Draws the switch, the feedback kept, then the jobs.
+    pub fn render(&self, jobs: &Jobs, enabled: bool, feedback: &[String], now: u64) {
         let width = self.scroll.contentSize().width;
         for row in self.list.subviews().iter() {
             row.removeFromSuperview();
         }
         self.actions.clear();
         let mut y = self.add_switch(enabled, width);
+        y = self.add_feedback(feedback, width, y);
         let mut ids = Vec::new();
         for job in jobs.all() {
             y = self.add_job(ids.len(), job, width, y, now) + CARD_GAP;
@@ -162,6 +226,55 @@ impl AutopilotPage {
         toggle.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
         self.list.addSubview(&toggle);
         height + 2.0 * CARD_GAP
+    }
+
+    /// The feedback every job follows, each line with × to forget it.
+    /// Returns the y below.
+    fn add_feedback(&self, feedback: &[String], width: f64, y: f64) -> f64 {
+        if feedback.is_empty() {
+            return y;
+        }
+        let heading = Attributes {
+            heavy: true,
+            ..Attributes::plain(theme::muted(), theme::font(theme::SMALL_SIZE))
+        };
+        let mut top =
+            y + self.add_wrapped(
+                &rich_text::attributed("Your feedback, followed by every job", &heading),
+                INDENT,
+                y,
+                width - 2.0 * INDENT,
+            ) + LINE_GAP;
+        let body = Attributes::plain(theme::ink(), theme::font(theme::SMALL_SIZE));
+        let text_width = width - 3.0 * INDENT - DELETE_WIDTH;
+        for (index, line) in feedback.iter().enumerate() {
+            let height = self
+                .add_wrapped(
+                    &rich_text::attributed(&format!("• {line}"), &body),
+                    INDENT,
+                    top,
+                    text_width,
+                )
+                .max(ROW_HEIGHT);
+            let remove = widgets::text_button(
+                self.mtm,
+                "×",
+                widgets::ButtonStyle::Link,
+                &self.actions.target(AutopilotAction::RemoveFeedback(index)),
+                Target::selector(),
+            );
+            remove.setToolTip(Some(&NSString::from_str("Forget this feedback")));
+            remove.setFrame(rect(
+                width - INDENT - DELETE_WIDTH,
+                top,
+                DELETE_WIDTH,
+                ROW_HEIGHT,
+            ));
+            remove.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+            self.list.addSubview(&remove);
+            top += height + LINE_GAP;
+        }
+        top + 2.0 * CARD_GAP
     }
 
     /// A card: title, status and ×; who asked what; the work's summary; then

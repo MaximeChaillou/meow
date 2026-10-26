@@ -35,8 +35,12 @@ impl Slack {
         match step {
             "autopilot" => {
                 host.open_page(Page::Feature(autopilot_page::PAGE_ID));
-                self.autopilot_page()
-                    .render(&sample_jobs(), true, now_secs());
+                self.autopilot_page().render(
+                    &sample_jobs(),
+                    true,
+                    &["Open the PR only, don't message on Slack".to_string()],
+                    now_secs(),
+                );
                 host.set_badge(autopilot_page::PAGE_ID, sample_jobs().waiting_count());
             }
             "slack-list" => {

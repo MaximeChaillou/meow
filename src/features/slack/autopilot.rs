@@ -125,7 +125,53 @@ impl Slack {
             AutopilotAction::Reject(tag) => self.decide_autopilot(tag, false, host),
             AutopilotAction::Dismiss(row) => self.dismiss_autopilot(row, host),
             AutopilotAction::OpenFolder(row) => self.open_autopilot_folder(row),
+            AutopilotAction::Feedback => {
+                let text = self.autopilot_page().take_feedback();
+                self.add_autopilot_feedback(&text, host);
+            }
+            AutopilotAction::RemoveFeedback(index) => self.remove_autopilot_feedback(index, host),
         }
+    }
+
+    /// Remembers `text` for every job from now on.
+    pub(super) fn add_autopilot_feedback(&mut self, text: &str, host: &mut dyn Host) {
+        let feedback = autopilot::add_feedback(&self.settings.autopilot_feedback, text);
+        self.set_autopilot_feedback(feedback, host);
+    }
+
+    /// Forgets the feedback at `index`.
+    pub(super) fn remove_autopilot_feedback(&mut self, index: usize, host: &mut dyn Host) {
+        let feedback = self
+            .settings
+            .autopilot_feedback
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != index)
+            .map(|(_, f)| f.clone())
+            .collect();
+        self.set_autopilot_feedback(feedback, host);
+    }
+
+    fn set_autopilot_feedback(&mut self, feedback: Vec<String>, host: &mut dyn Host) {
+        if feedback == self.settings.autopilot_feedback {
+            return;
+        }
+        self.settings = SlackSettings {
+            autopilot_feedback: feedback,
+            ..self.settings.clone()
+        };
+        if let Err(error) = host.settings().set(&self.settings) {
+            eprintln!("meow: {error}");
+        }
+        self.autopilot_dirty = true;
+    }
+
+    /// The user's rules file and feedback, for the triage and the work.
+    fn autopilot_rules(&self) -> Option<String> {
+        autopilot::rules(
+            autopilot::user_rules().as_deref(),
+            &self.settings.autopilot_feedback,
+        )
     }
 
     /// `message`, from `from`, is for the user: triage its conversation (or
@@ -192,7 +238,7 @@ impl Slack {
             &self.me(),
             &waiting.from,
             &self.conversation_text(&waiting),
-            autopilot::user_rules().as_deref(),
+            self.autopilot_rules().as_deref(),
         );
         match Run::start_offline(env, &prompt) {
             Ok(run) => self.autopilot.triage = Some((run, waiting)),
@@ -375,7 +421,7 @@ impl Slack {
             .ok()
             .filter(|m| !m.trim().is_empty())
             .unwrap_or_else(|| STRONG_MODEL.to_string());
-        let prompt = autopilot::work_prompt(&job, &self.me());
+        let prompt = autopilot::work_prompt(&job, &self.me(), self.autopilot_rules().as_deref());
         match Run::start_guarded(env, &prompt, None, &model, &cwd, &held, None) {
             Ok(run) => {
                 self.autopilot.active = Some(Active {
@@ -654,8 +700,12 @@ impl Slack {
     /// Redraws the Autopilot page, and the count of jobs waiting in the sidebar.
     pub(super) fn render_autopilot(&self, host: &mut dyn Host) {
         let jobs = &self.autopilot.jobs;
-        self.autopilot_page()
-            .render(jobs, self.settings.autopilot, now_secs());
+        self.autopilot_page().render(
+            jobs,
+            self.settings.autopilot,
+            &self.settings.autopilot_feedback,
+            now_secs(),
+        );
         host.set_badge(autopilot_page::PAGE_ID, jobs.waiting_count());
     }
 }

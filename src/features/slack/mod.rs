@@ -47,6 +47,8 @@ pub(crate) struct SlackSettings {
     pub write_as_me: bool,
     /// Slack messages asking the user for something start autopilot work.
     pub autopilot: bool,
+    /// What the user told Autopilot about its work, followed by every job.
+    pub autopilot_feedback: Vec<String>,
 }
 
 enum Msg {
@@ -211,7 +213,7 @@ impl Feature for Slack {
                 Some(view)
             }
             autopilot_page::PAGE_ID => {
-                let page = AutopilotPage::new(kit.mtm, kit.frame, move |action| {
+                let page = AutopilotPage::new(kit.mtm, kit.controller, kit.frame, move |action| {
                     inbox.send(Msg::Autopilot(action))
                 });
                 let view = PageView {
