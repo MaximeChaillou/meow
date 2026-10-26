@@ -591,11 +591,11 @@ impl Slack {
             Event::New { channel, messages } => {
                 self.slack.cache.append(&channel, &messages);
                 self.slack.cache_dirty = true;
-                self.notify_slack(&channel, &messages, host);
+                self.notify_slack(&channel, &messages, &[], host);
+                let from_others = messages
+                    .iter()
+                    .any(|m| m.user.as_deref() != self.slack.me.as_deref());
                 if self.slack.open.as_deref() == Some(&channel) {
-                    let from_others = messages
-                        .iter()
-                        .any(|m| m.user.as_deref() != self.slack.me.as_deref());
                     self.slack.messages.extend(messages);
                     // Something new: show the latest again, unless reading a thread.
                     if self.slack.thread.is_none() {
@@ -604,7 +604,7 @@ impl Slack {
                     if from_others && !self.slack_visible(host) {
                         host.alert();
                     }
-                } else {
+                } else if from_others {
                     host.alert();
                 }
             }
@@ -622,6 +622,14 @@ impl Slack {
                     }
                     self.slack.thread_messages = messages;
                 }
+            }
+            Event::Replies {
+                channel,
+                thread,
+                fresh,
+            } => {
+                self.autopilot_thread_changed(&channel, &thread);
+                self.notify_slack(&channel, &fresh, &thread, host);
             }
             Event::Sent { .. } => {}
             Event::Error(message) => {
@@ -678,8 +686,20 @@ impl Slack {
     }
 
     /// A DM or a mention from someone else, out of sight, goes to Activity.
-    fn notify_slack(&mut self, channel: &str, messages: &[Message], host: &mut dyn Host) {
-        let watching = self.slack_visible(host) && self.slack.open.as_deref() == Some(channel);
+    /// `thread` is the whole thread when `messages` are replies in it.
+    fn notify_slack(
+        &mut self,
+        channel: &str,
+        messages: &[Message],
+        thread: &[Message],
+        host: &mut dyn Host,
+    ) {
+        // Replies are in sight only in their own thread.
+        let in_sight = thread
+            .first()
+            .is_none_or(|parent| self.slack.thread.as_deref() == Some(parent.ts.as_str()));
+        let watching =
+            in_sight && self.slack_visible(host) && self.slack.open.as_deref() == Some(channel);
         let Some(conversation) = self.slack.channels.iter().find(|c| c.id == channel) else {
             return;
         };
@@ -699,7 +719,7 @@ impl Slack {
         };
         // Even when reading it: preparing the work is what saves time.
         let last = (*last).clone();
-        self.consider_for_autopilot(channel, &last, &title);
+        self.consider_for_autopilot(channel, &last, &title, thread);
         if watching {
             return;
         }

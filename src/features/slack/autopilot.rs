@@ -37,6 +37,8 @@ struct Waiting {
     channel: String,
     /// The last message for the user.
     message: Message,
+    /// The whole thread, when the message is a reply in one.
+    thread: Vec<Message>,
     /// "Axel", "Axel in #eng".
     from: String,
     due: Instant,
@@ -126,8 +128,15 @@ impl Slack {
         }
     }
 
-    /// `message`, from `from`, is for the user: triage its conversation once quiet.
-    pub(super) fn consider_for_autopilot(&mut self, channel: &str, message: &Message, from: &str) {
+    /// `message`, from `from`, is for the user: triage its conversation (or
+    /// `thread`, when it replies in one) once quiet.
+    pub(super) fn consider_for_autopilot(
+        &mut self,
+        channel: &str,
+        message: &Message,
+        from: &str,
+        thread: &[Message],
+    ) {
         if !self.settings.autopilot || self.autopilot.jobs.has_origin(channel, &message.ts) {
             return;
         }
@@ -138,6 +147,7 @@ impl Slack {
         self.autopilot.waiting.push(Waiting {
             channel: channel.to_string(),
             message: message.clone(),
+            thread: thread.to_vec(),
             from: from.to_string(),
             due: Instant::now() + QUIET,
         });
@@ -190,11 +200,32 @@ impl Slack {
         }
     }
 
+    /// `thread` of `channel` changed: what waits in it is triaged on the new one.
+    pub(super) fn autopilot_thread_changed(&mut self, channel: &str, thread: &[Message]) {
+        let Some(parent) = thread.first() else {
+            return;
+        };
+        let waiting = self.autopilot.waiting.iter_mut().filter(|w| {
+            w.channel == channel && w.message.thread_ts.as_deref() == Some(parent.ts.as_str())
+        });
+        for waiting in waiting {
+            waiting.thread = thread.to_vec();
+        }
+    }
+
+    /// The messages around `waiting`'s: its thread, else its conversation.
+    fn context<'a>(&'a self, waiting: &'a Waiting) -> &'a [Message] {
+        if waiting.thread.is_empty() {
+            self.slack.history(&waiting.channel)
+        } else {
+            &waiting.thread
+        }
+    }
+
     /// Whether the user wrote in the conversation after `waiting`'s message.
     fn answered_since(&self, waiting: &Waiting) -> bool {
         let me = self.slack.my_id();
-        self.slack
-            .history(&waiting.channel)
+        self.context(waiting)
             .iter()
             .any(|m| m.user.as_deref() == me && me.is_some() && m.ts > waiting.message.ts)
     }
@@ -202,8 +233,8 @@ impl Slack {
     /// The conversation's last messages, oldest first, as `Name: text`; the
     /// message for the user is always among them.
     fn conversation_text(&self, waiting: &Waiting) -> String {
-        let history = self.slack.history(&waiting.channel);
-        let mut messages: Vec<&Message> = history
+        let mut messages: Vec<&Message> = self
+            .context(waiting)
             .iter()
             .filter(|m| m.ts <= waiting.message.ts)
             .collect();
