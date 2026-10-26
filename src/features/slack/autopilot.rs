@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use meow::activity::{Kind, Link, Note};
 use meow::autopilot::{self, ActionState, Folder, Job, Jobs, Origin, Stage};
-use meow::claude::{ClaudeEvent, Run, STRONG_MODEL};
+use meow::claude::{ClaudeEvent, Run};
 use meow::guard::{self, Call};
 use meow::slack::model::Message;
 use meow::source::Source;
@@ -25,11 +25,11 @@ use crate::app::feature::Host;
 
 /// A conversation is triaged once quiet this long, so a request written in
 /// several messages is read whole.
-const QUIET: Duration = Duration::from_secs(45);
+const QUIET: Duration = Duration::from_secs(30);
 /// At most this many of the conversation's last messages are shown to the triage.
 const CONTEXT_MESSAGES: usize = 12;
 const POLL_EVERY: Duration = Duration::from_secs(1);
-/// The work's model, unless `MEOW_AUTOPILOT_MODEL` says otherwise: it codes.
+/// Runs every job on this model instead of the one its triage picked.
 const MODEL_VAR: &str = "MEOW_AUTOPILOT_MODEL";
 
 /// New messages for the user in a conversation, waiting for it to be quiet.
@@ -66,6 +66,8 @@ pub(super) struct AutopilotState {
     preparing: Option<(u64, Receiver<Result<Folder, String>>)>,
     active: Option<Active>,
     next_poll: Instant,
+    /// The running work took steps the page doesn't show yet.
+    redraw: bool,
 }
 
 impl AutopilotState {
@@ -79,6 +81,7 @@ impl AutopilotState {
             preparing: None,
             active: None,
             next_poll: Instant::now(),
+            redraw: false,
         };
         let Some(path) = autopilot::default_path() else {
             return (state(Jobs::default(), None), None);
@@ -107,6 +110,7 @@ impl AutopilotState {
             preparing: None,
             active: None,
             next_poll: Instant::now(),
+            redraw: false,
         }
     }
 
@@ -207,8 +211,27 @@ impl Slack {
             return;
         }
         self.autopilot.next_poll = Instant::now() + POLL_EVERY;
+        self.hold_running_calls(host);
+        if self.autopilot.redraw && !self.autopilot_page().is_clicked() {
+            self.autopilot.redraw = false;
+            self.render_autopilot(host);
+        }
         self.start_triage(host);
         self.start_next_job(host);
+    }
+
+    /// Calls the running work was refused wait for the user at once, not
+    /// only once it ends.
+    fn hold_running_calls(&mut self, host: &mut dyn Host) {
+        let Some(id) = self.autopilot.active.as_ref().map(|a| a.job) else {
+            return;
+        };
+        let Some(held) = autopilot::job_dir(id).map(|dir| dir.join("held.jsonl")) else {
+            return;
+        };
+        if self.autopilot.jobs.hold(id, guard::read_held(&held)) {
+            self.autopilot_changed(host);
+        }
     }
 
     /// The user's name, as the prompts call them.
@@ -229,10 +252,10 @@ impl Slack {
         };
         let waiting = self.autopilot.waiting.remove(index);
         if self.answered_since(&waiting) {
-            return;
+            return self.leave_alone(&waiting, "you had already answered", host);
         }
         let Some(env) = host.claude() else {
-            return;
+            return self.leave_alone(&waiting, "Claude Code wasn't found", host);
         };
         let prompt = autopilot::triage_prompt(
             &self.me(),
@@ -242,7 +265,31 @@ impl Slack {
         );
         match Run::start_offline(env, &prompt) {
             Ok(run) => self.autopilot.triage = Some((run, waiting)),
-            Err(error) => eprintln!("meow: autopilot: {error}"),
+            Err(error) => {
+                let why = format!("the triage couldn't start: {error}");
+                self.leave_alone(&waiting, &why, host);
+            }
+        }
+    }
+
+    /// Lists `waiting`'s message on the Autopilot page as left alone, and `why`.
+    fn leave_alone(&mut self, waiting: &Waiting, why: &str, host: &mut dyn Host) {
+        eprintln!("meow: autopilot: {} left alone: {why}", waiting.from);
+        let origin = self.origin_of(waiting);
+        self.autopilot
+            .jobs
+            .leave_alone(origin, why.to_string(), now_secs());
+        self.autopilot_changed(host);
+    }
+
+    /// The Slack message `waiting` is about, as a job's origin.
+    fn origin_of(&self, waiting: &Waiting) -> Origin {
+        Origin {
+            channel: waiting.channel.clone(),
+            ts: waiting.message.ts.clone(),
+            thread_ts: waiting.message.thread_ts.clone(),
+            from: waiting.from.clone(),
+            text: self.slack.text_of(&waiting.message),
         }
     }
 
@@ -308,29 +355,28 @@ impl Slack {
                 return;
             };
             break match run.events.try_recv() {
-                Ok(ClaudeEvent::Done { is_error, result }) => (!is_error).then_some(result),
-                Ok(ClaudeEvent::Failed(reason)) => {
-                    eprintln!("meow: autopilot triage: {reason}");
-                    None
-                }
+                Ok(ClaudeEvent::Done {
+                    is_error: false,
+                    result,
+                }) => autopilot::read_triage(&result).map_err(str::to_string),
+                Ok(ClaudeEvent::Done {
+                    is_error: true,
+                    result,
+                }) => Err(format!("the triage failed: {}", result.trim())),
+                Ok(ClaudeEvent::Failed(reason)) => Err(format!("the triage failed: {reason}")),
                 Ok(_) => continue,
                 Err(TryRecvError::Empty) => return,
-                Err(TryRecvError::Disconnected) => None,
+                Err(TryRecvError::Disconnected) => Err("the triage stopped early".to_string()),
             };
         };
         let Some((_, waiting)) = self.autopilot.triage.take() else {
             return;
         };
-        let Some(plan) = outcome.as_deref().and_then(autopilot::parse_plan) else {
-            return;
+        let plan = match outcome {
+            Ok(plan) => plan,
+            Err(why) => return self.leave_alone(&waiting, &why, host),
         };
-        let origin = Origin {
-            channel: waiting.channel,
-            ts: waiting.message.ts.clone(),
-            thread_ts: waiting.message.thread_ts.clone(),
-            from: waiting.from,
-            text: self.slack.text_of(&waiting.message),
-        };
+        let origin = self.origin_of(&waiting);
         self.autopilot.jobs.add(plan, origin, now_secs());
         self.autopilot_changed(host);
     }
@@ -420,7 +466,7 @@ impl Slack {
         let model = std::env::var(MODEL_VAR)
             .ok()
             .filter(|m| !m.trim().is_empty())
-            .unwrap_or_else(|| STRONG_MODEL.to_string());
+            .unwrap_or_else(|| job.model().to_string());
         let prompt = autopilot::work_prompt(&job, &self.me(), self.autopilot_rules().as_deref());
         match Run::start_guarded(env, &prompt, None, &model, &cwd, &held, None) {
             Ok(run) => {
@@ -432,6 +478,7 @@ impl Slack {
                 });
                 if let Some(job) = self.autopilot.jobs.get_mut(id) {
                     job.stage = Stage::Working;
+                    job.ran_on = Some(model);
                 }
                 self.autopilot_changed(host);
             }
@@ -509,6 +556,14 @@ impl Slack {
             break match active.run.events.try_recv() {
                 Ok(ClaudeEvent::Session(id)) => {
                     active.session = Some(id);
+                    continue;
+                }
+                Ok(ClaudeEvent::Tool(step)) => {
+                    if matches!(active.step, Step::Work) {
+                        let job = active.job;
+                        self.autopilot.jobs.step(job, &step);
+                        self.autopilot.redraw = true;
+                    }
                     continue;
                 }
                 Ok(ClaudeEvent::Done {

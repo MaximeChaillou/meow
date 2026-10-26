@@ -1,16 +1,18 @@
 //! The Autopilot page: work Meow started by itself from Slack messages, newest
 //! first. Each card says who asked what, how the work went, and lists the
 //! actions that wait for the user (a push, a reply…) with Approve and Reject.
-//! Feedback typed at the bottom is kept and followed by every later job.
+//! A running job shows its last steps. Feedback typed at the bottom is kept
+//! and followed by every later job; below the jobs, the messages the triage
+//! last left alone say why.
 
 use std::cell::RefCell;
 
-use meow::autopilot::{self, Action, ActionState, Job, Jobs, Stage};
+use meow::autopilot::{self, Action, ActionState, Job, Jobs, LeftAlone, Stage};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSColor, NSScrollView, NSTextAlignment, NSTextField, NSView,
+    NSAutoresizingMaskOptions, NSColor, NSEvent, NSScrollView, NSTextAlignment, NSTextField, NSView,
 };
 use objc2_foundation::{NSAttributedString, NSPoint, NSRect, NSSize, NSString};
 
@@ -163,6 +165,12 @@ impl AutopilotPage {
         self.shown_ids.borrow().get(index).copied()
     }
 
+    /// Whether a mouse button is down: drawing the list again now would
+    /// swallow the click on the button under it.
+    pub fn is_clicked(&self) -> bool {
+        NSEvent::pressedMouseButtons() != 0
+    }
+
     /// The feedback typed, emptying the field.
     pub fn take_feedback(&self) -> String {
         let text = self.input.stringValue().to_string();
@@ -170,7 +178,7 @@ impl AutopilotPage {
         text
     }
 
-    /// Draws the switch, the feedback kept, then the jobs.
+    /// Draws the switch, the feedback kept, the jobs, then the messages left alone.
     pub fn render(&self, jobs: &Jobs, enabled: bool, feedback: &[String], now: u64) {
         let width = self.scroll.contentSize().width;
         for row in self.list.subviews().iter() {
@@ -184,6 +192,7 @@ impl AutopilotPage {
             y = self.add_job(ids.len(), job, width, y, now) + CARD_GAP;
             ids.push(job.id);
         }
+        y = self.add_left_alone(jobs.left_alone(), width, y, now);
         let height = y.max(self.scroll.contentSize().height);
         self.list.setFrameSize(NSSize::new(width, height));
         self.shown_ids.replace(ids);
@@ -277,8 +286,46 @@ impl AutopilotPage {
         top + 2.0 * CARD_GAP
     }
 
-    /// A card: title, status and ×; who asked what; the work's summary; then
-    /// each held action. Returns the y below.
+    /// The messages the triage last made no job of, each with why. Returns the y below.
+    fn add_left_alone(&self, left: &[LeftAlone], width: f64, y: f64, now: u64) -> f64 {
+        if left.is_empty() {
+            return y;
+        }
+        let heading = Attributes {
+            heavy: true,
+            ..Attributes::plain(theme::muted(), theme::font(theme::SMALL_SIZE))
+        };
+        let text_width = width - 2.0 * INDENT;
+        let mut top = y
+            + CARD_GAP
+            + self.add_wrapped(
+                &rich_text::attributed("Left alone recently", &heading),
+                INDENT,
+                y + CARD_GAP,
+                text_width,
+            )
+            + LINE_GAP;
+        let faint = Attributes::plain(theme::faint(), theme::font(theme::SMALL_SIZE));
+        for entry in left {
+            let line = format!(
+                "{} · {}: {} — {}",
+                ago(now, entry.at),
+                entry.from,
+                clip(&entry.text, 120),
+                entry.why
+            );
+            top += self.add_wrapped(
+                &rich_text::attributed(&line, &faint),
+                INDENT,
+                top,
+                text_width,
+            ) + LINE_GAP;
+        }
+        top + CARD_GAP
+    }
+
+    /// A card: title, status and ×; who asked what; the work's last steps
+    /// while it runs, else its summary; then each held action. Returns the y below.
     fn add_job(&self, row: usize, job: &Job, width: f64, y: f64, now: u64) -> f64 {
         let card = FlippedView::new(self.mtm, rect(0.0, y, width, 0.0));
         card.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
@@ -353,6 +400,21 @@ impl AutopilotPage {
             open.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
             self.list.addSubview(&open);
             top += ROW_HEIGHT + LINE_GAP;
+        }
+
+        if job.stage == Stage::Working {
+            let faint = Attributes::plain(theme::faint(), theme::font(theme::SMALL_SIZE));
+            for step in &job.steps {
+                top += self.add_wrapped(
+                    &rich_text::attributed(&format!("› {step}"), &faint),
+                    2.0 * INDENT,
+                    top,
+                    inner,
+                );
+            }
+            if !job.steps.is_empty() {
+                top += LINE_GAP;
+            }
         }
 
         if let Some(summary) = &job.summary {
@@ -493,25 +555,41 @@ fn status(job: &Job, now: u64) -> (String, Retained<NSColor>) {
     match job.stage {
         Stage::Queued => ("waiting its turn".into(), theme::muted()),
         Stage::Preparing => ("making a worktree…".into(), theme::live()),
-        Stage::Working => ("working…".into(), theme::live()),
+        Stage::Working => match &job.ran_on {
+            Some(model) => (format!("working on {}…", capitalized(model)), theme::live()),
+            None => ("working…".into(), theme::live()),
+        },
         Stage::Failed => ("failed".into(), theme::error()),
         Stage::Finished => match job.pending() {
             0 => {
-                let ago = job
+                let done = job
                     .finished_at
-                    .map(|at| now.saturating_sub(at) / 60)
-                    .map(|minutes| match minutes {
-                        0 => "done just now".to_string(),
-                        m if m < 60 => format!("done {m} min ago"),
-                        m => format!("done {} h ago", m / 60),
-                    })
+                    .map(|at| format!("done {}", ago(now, at)))
                     .unwrap_or_else(|| "done".into());
-                (ago, theme::faint())
+                (done, theme::faint())
             }
             1 => ("1 to approve".into(), theme::accent()),
             n => (format!("{n} to approve"), theme::accent()),
         },
     }
+}
+
+/// How long before `now` `at` was: "just now", "5 min ago", "2 h ago".
+fn ago(now: u64, at: u64) -> String {
+    match now.saturating_sub(at) / 60 {
+        0 => "just now".to_string(),
+        m if m < 60 => format!("{m} min ago"),
+        m => format!("{} h ago", m / 60),
+    }
+}
+
+/// "opus" as "Opus".
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 fn action_status(state: ActionState) -> (&'static str, Retained<NSColor>) {

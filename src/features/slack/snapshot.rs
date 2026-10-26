@@ -99,6 +99,7 @@ fn sample_jobs() -> Jobs {
         repo: None,
         pr: None,
         branch: None,
+        hard: None,
     };
     let now = now_secs();
     jobs.add(
@@ -139,7 +140,20 @@ fn sample_jobs() -> Jobs {
     );
     if let Some(job) = jobs.get_mut(2) {
         job.stage = autopilot::Stage::Working;
+        job.ran_on = Some("opus".into());
     }
+    for step in [
+        "Bash: List the failed CI runs",
+        "Read: app/build.gradle.kts",
+        "Bash: Run ./gradlew assembleDebug",
+    ] {
+        jobs.step(2, step);
+    }
+    jobs.leave_alone(
+        origin("3", "Merci pour la review !"),
+        "no work to prepare".into(),
+        now,
+    );
     jobs
 }
 

@@ -8,9 +8,10 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
+use crate::claude::STRONG_MODEL;
 use crate::guard::Call;
 use crate::tasks::take_fence;
 
@@ -22,6 +23,13 @@ const MAX_SUMMARY_CHARS: usize = 4000;
 const MAX_JOBS: usize = 50;
 /// Longest a piece of feedback is kept.
 const MAX_FEEDBACK_CHARS: usize = 500;
+/// The work's model unless it is hard: quick, and enough to look things up
+/// and draft a reply.
+pub const EVERYDAY_MODEL: &str = "sonnet";
+/// How many of a running job's last steps its card shows.
+const MAX_STEPS: usize = 3;
+/// How many of the messages the triage left alone are listed.
+const MAX_LEFT_ALONE: usize = 5;
 
 /// What the triage found to prepare.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -39,6 +47,32 @@ pub struct Plan {
     /// The branch to work on, when no pull request says it.
     #[serde(default)]
     pub branch: Option<String>,
+    /// Whether the work changes code or is a long investigation, for the
+    /// strong model; unsaid, work in a repository is.
+    #[serde(default, deserialize_with = "loose_bool")]
+    pub hard: Option<bool>,
+}
+
+/// A yes or no the triage may write as `true` or `"true"`; anything else is unsaid.
+fn loose_bool<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+    Ok(match Value::deserialize(deserializer)? {
+        Value::Bool(said) => Some(said),
+        Value::String(said) => match said.trim().to_lowercase().as_str() {
+            "true" | "yes" => Some(true),
+            "false" | "no" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+/// A message the triage made no job of, and why.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeftAlone {
+    pub from: String,
+    pub text: String,
+    pub why: String,
+    pub at: u64,
 }
 
 /// The Slack message that started a job.
@@ -119,6 +153,9 @@ pub struct Job {
     pub pr: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// Whether to run on the strong model: see [`Plan::hard`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hard: Option<bool>,
     pub created_at: u64,
     pub stage: Stage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -136,6 +173,12 @@ pub struct Job {
     pub actions: Vec<Action>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<u64>,
+    /// The running work's last steps ("Bash: Run the tests"), newest last.
+    #[serde(skip)]
+    pub steps: Vec<String>,
+    /// The model the work last ran on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ran_on: Option<String>,
 }
 
 impl Job {
@@ -167,6 +210,16 @@ impl Job {
             && self.folder_error.is_none()
     }
 
+    /// The Claude model the work runs on.
+    pub fn model(&self) -> &'static str {
+        let code = self.repo.is_some() || self.pr.is_some();
+        if self.hard.unwrap_or(code) {
+            STRONG_MODEL
+        } else {
+            EVERYDAY_MODEL
+        }
+    }
+
     /// The run's working folder, with the default when the job has none.
     pub fn cwd<'a>(&'a self, default: &'a Path) -> &'a Path {
         self.folder.as_ref().map_or(default, |f| f.path.as_path())
@@ -179,6 +232,9 @@ pub struct Jobs {
     jobs: Vec<Job>,
     #[serde(default)]
     next_id: u64,
+    /// Newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    left_alone: Vec<LeftAlone>,
 }
 
 impl Jobs {
@@ -206,6 +262,23 @@ impl Jobs {
             .any(|j| j.origin.channel == channel && j.origin.ts == ts)
     }
 
+    /// The messages the triage last made no job of, newest first.
+    pub fn left_alone(&self) -> &[LeftAlone] {
+        &self.left_alone
+    }
+
+    /// Remembers that the triage made no job of `origin`'s message, and `why`.
+    pub fn leave_alone(&mut self, origin: Origin, why: String, now: u64) {
+        let entry = LeftAlone {
+            from: origin.from,
+            text: clip(&origin.text, 200),
+            why,
+            at: now,
+        };
+        self.left_alone.insert(0, entry);
+        self.left_alone.truncate(MAX_LEFT_ALONE);
+    }
+
     /// A new queued job for `plan`, started by `origin`.
     pub fn add(&mut self, plan: Plan, origin: Origin, now: u64) -> &Job {
         self.next_id += 1;
@@ -220,6 +293,7 @@ impl Jobs {
             repo: plan.repo.filter(|r| !r.trim().is_empty()),
             pr: plan.pr.filter(|p| !p.trim().is_empty()),
             branch: plan.branch.filter(|b| !b.trim().is_empty()),
+            hard: plan.hard,
             created_at: now,
             stage: Stage::Queued,
             folder: None,
@@ -228,6 +302,8 @@ impl Jobs {
             summary: None,
             actions: Vec::new(),
             finished_at: None,
+            steps: Vec::new(),
+            ran_on: None,
         };
         self.jobs.insert(0, job);
         &self.jobs[0]
@@ -258,12 +334,25 @@ impl Jobs {
         job.stage = stage;
         job.summary = Some(clip(summary.trim(), MAX_SUMMARY_CHARS));
         job.finished_at = Some(now);
+        job.steps.clear();
         self.hold(id, held);
     }
 
-    /// Adds the calls of job `id` held since, each once, for the user to decide on.
-    pub fn hold(&mut self, id: u64, held: Vec<Call>) {
+    /// Job `id`'s work took `step`: only the last [`MAX_STEPS`] are kept.
+    pub fn step(&mut self, id: u64, step: &str) {
         let Some(job) = self.get_mut(id) else { return };
+        job.steps.push(step.to_string());
+        let extra = job.steps.len().saturating_sub(MAX_STEPS);
+        job.steps.drain(..extra);
+    }
+
+    /// Adds the calls of job `id` held since, each once, for the user to
+    /// decide on. Returns whether any was new.
+    pub fn hold(&mut self, id: u64, held: Vec<Call>) -> bool {
+        let Some(job) = self.get_mut(id) else {
+            return false;
+        };
+        let before = job.actions.len();
         for call in held {
             if !job.actions.iter().any(|a| a.call.same_as(&call)) {
                 job.actions.push(Action {
@@ -273,6 +362,7 @@ impl Jobs {
                 });
             }
         }
+        job.actions.len() > before
     }
 
     /// Sets action `index` of job `id` to `state`, with its result.
@@ -312,12 +402,14 @@ impl Jobs {
         gone
     }
 
-    /// Jobs a restart interrupted start again from the beginning, and
-    /// actions that were being made wait for the user again.
+    /// Jobs a restart interrupted start again from the beginning, forgetting
+    /// the calls their run held (its session is gone; the new run holds them
+    /// again), and actions that were being made wait for the user again.
     pub fn after_restart(&mut self) {
         for job in &mut self.jobs {
             if matches!(job.stage, Stage::Preparing | Stage::Working) {
                 job.stage = Stage::Queued;
+                job.actions.clear();
             }
             for action in &mut job.actions {
                 if action.state == ActionState::Running {
@@ -422,8 +514,20 @@ details (links, PR numbers, branch names, error messages), what done looks like,
 \"repo\": the GitHub repository as owner/name when the work is in code and you can tell it \
 (from a link, or a repository named in the conversation), else null; \"pr\": the pull request's \
 URL when the conversation links it, else its number, else null; \"branch\": \
-the branch to work on when named and there is no pull request, else null}}."
+the branch to work on when named and there is no pull request, else null; \"hard\": true when \
+the work writes or changes code (a fix, conflicts, a review comment, a feature) or is a long, \
+tricky investigation, false for looking up an answer, explaining code or drafting a reply}}."
     )
+}
+
+/// The plan in a triage answer, else why there is no job: no work, or an
+/// answer that could not be read.
+pub fn read_triage(answer: &str) -> Result<Plan, &'static str> {
+    match parse_plan(answer) {
+        Some(plan) => Ok(plan),
+        None if answer.contains(PLAN_FENCE) => Err("its answer couldn't be read"),
+        None => Err("no work to prepare"),
+    }
 }
 
 /// The plan in a triage answer; `None` for `none` or anything unreadable.
@@ -438,6 +542,7 @@ pub fn parse_plan(answer: &str) -> Option<Plan> {
             .map(|r| r.trim().trim_end_matches(".git").to_string()),
         pr: plan.pr.map(|p| p.trim().to_string()),
         branch: plan.branch.map(|b| b.trim().to_string()),
+        ..plan
     };
     (!plan.title.is_empty() && !plan.prompt.is_empty()).then_some(plan)
 }
@@ -590,6 +695,7 @@ mod tests {
             repo: Some("o/r".into()),
             pr: Some("12".into()),
             branch: None,
+            hard: None,
         }
     }
 
@@ -623,6 +729,141 @@ mod tests {
             parse_plan("```meow-autopilot\n{\"title\": \"\", \"prompt\": \"x\"}\n```"),
             None
         );
+    }
+
+    #[test]
+    fn plans_quoting_code_from_the_message_are_read_whole() {
+        let answer = "```meow-autopilot\n{\"title\": \"Answer Julien\", \"prompt\": \"He pasted:\\n\
+                      ```kotlin\\nfun confirmOrder()\\n```\\nExplain it.\", \"hard\": false}\n```";
+        let plan = parse_plan(answer).unwrap();
+        assert!(plan.prompt.ends_with("```\nExplain it."), "{}", plan.prompt);
+        assert_eq!(plan.hard, Some(false));
+        let loose = |hard: &str| {
+            let answer = format!(
+                "```meow-autopilot\n{{\"title\": \"t\", \"prompt\": \"p\", \"hard\": {hard}}}\n```"
+            );
+            parse_plan(&answer).map(|p| p.hard)
+        };
+        assert_eq!(loose("\"true\""), Some(Some(true)));
+        assert_eq!(loose("\"maybe\""), Some(None));
+        assert_eq!(loose("null"), Some(None));
+    }
+
+    #[test]
+    fn the_triage_says_why_it_made_no_job() {
+        assert_eq!(read_triage("none"), Err("no work to prepare"));
+        assert_eq!(
+            read_triage("```meow-autopilot\n{\"title\": \"x\", \"prompt\": \"cut ```\n"),
+            Err("its answer couldn't be read")
+        );
+        let answer = "```meow-autopilot\n{\"title\": \"x\", \"prompt\": \"y\"}\n```";
+        assert_eq!(read_triage(answer).map(|p| p.title), Ok("x".to_string()));
+    }
+
+    #[test]
+    fn hard_work_runs_on_the_strong_model() {
+        let mut jobs = Jobs::default();
+        let light = Plan {
+            hard: Some(false),
+            ..plan()
+        };
+        let hard = Plan {
+            hard: Some(true),
+            repo: None,
+            pr: None,
+            ..plan()
+        };
+        let unsaid = Plan {
+            hard: None,
+            ..plan()
+        };
+        let answer = Plan {
+            hard: None,
+            repo: None,
+            pr: None,
+            ..plan()
+        };
+        let ids: Vec<u64> = [light, hard, unsaid, answer]
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| jobs.add(p, origin(&i.to_string()), 0).id)
+            .collect();
+        let models: Vec<&str> = ids
+            .iter()
+            .map(|id| jobs.get(*id).unwrap().model())
+            .collect();
+        // Unsaid, a job with a repository or a pull request is code work.
+        assert_eq!(models, ["sonnet", "opus", "opus", "sonnet"]);
+        let saved_before = serde_json::json!({
+            "id": 9, "title": "t", "origin": origin("9"), "plan_prompt": "p",
+            "repo": "o/r", "created_at": 0, "stage": "queued",
+        });
+        let old: Job = serde_json::from_value(saved_before).unwrap();
+        assert_eq!(
+            old.model(),
+            "opus",
+            "saved before jobs said whether they were hard"
+        );
+        assert!(triage_prompt("Axel", "Julien", "Julien: hi", None).contains("\"hard\""));
+    }
+
+    #[test]
+    fn jobs_restarted_from_scratch_forget_what_their_run_held() {
+        let mut jobs = Jobs::default();
+        let id = jobs.add(plan(), origin("1"), 0).id;
+        jobs.get_mut(id).unwrap().stage = Stage::Working;
+        jobs.hold(id, vec![push()]);
+        jobs.set_action(id, 0, ActionState::Approved, None);
+        jobs.after_restart();
+        let job = jobs.get(id).unwrap();
+        assert_eq!(job.stage, Stage::Queued);
+        assert!(job.actions.is_empty(), "its session is gone with the run");
+        assert_eq!(jobs.next_approved(), None);
+    }
+
+    #[test]
+    fn running_jobs_show_their_last_steps_until_they_end() {
+        let mut jobs = Jobs::default();
+        let id = jobs.add(plan(), origin("1"), 0).id;
+        for step in [
+            "Read: a.rs",
+            "Bash: Run tests",
+            "Edit: a.rs",
+            "Bash: Commit",
+        ] {
+            jobs.step(id, step);
+        }
+        assert_eq!(
+            jobs.get(id).unwrap().steps,
+            ["Bash: Run tests", "Edit: a.rs", "Bash: Commit"]
+        );
+        jobs.finish(id, Ok("Done.".into()), vec![], 1);
+        assert!(jobs.get(id).unwrap().steps.is_empty());
+    }
+
+    #[test]
+    fn calls_held_while_working_wait_at_once_and_only_once() {
+        let mut jobs = Jobs::default();
+        let id = jobs.add(plan(), origin("1"), 0).id;
+        jobs.get_mut(id).unwrap().stage = Stage::Working;
+        assert!(jobs.hold(id, vec![push()]));
+        assert!(!jobs.hold(id, vec![push()]), "already waiting");
+        assert_eq!(jobs.waiting_count(), 1);
+        jobs.finish(id, Ok("Pushed later.".into()), vec![push()], 1);
+        assert_eq!(jobs.get(id).unwrap().actions.len(), 1);
+    }
+
+    #[test]
+    fn messages_left_alone_are_listed_newest_first_and_capped() {
+        let mut jobs = Jobs::default();
+        for i in 0..MAX_LEFT_ALONE + 2 {
+            jobs.leave_alone(origin(&i.to_string()), "no work found".into(), i as u64);
+        }
+        let left = jobs.left_alone();
+        assert_eq!(left.len(), MAX_LEFT_ALONE);
+        assert_eq!(left[0].at, (MAX_LEFT_ALONE + 1) as u64);
+        assert_eq!(left[0].why, "no work found");
+        assert_eq!(left[0].from, "Axel");
     }
 
     #[test]
@@ -772,6 +1013,7 @@ mod tests {
         let mut jobs = Jobs::default();
         jobs.add(plan(), origin("1"), 5);
         jobs.finish(1, Err("no clone".into()), vec![push()], 6);
+        jobs.leave_alone(origin("2"), "no work found".into(), 7);
         jobs.save(&path).unwrap();
         assert_eq!(Jobs::load(&path).unwrap(), jobs);
         std::fs::remove_dir_all(dir).unwrap();

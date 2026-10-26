@@ -344,13 +344,29 @@ pub fn take_fence(answer: &str, fence: &str) -> (String, Option<String>) {
         return (answer.to_string(), None);
     };
     let body_start = start + opening.len();
-    let Some(body_len) = answer[body_start..].find("```") else {
+    let Some(body_len) = closing_fence(&answer[body_start..]) else {
         return (answer.to_string(), None);
     };
     let body = &answer[body_start..body_start + body_len];
     let block_end = body_start + body_len + 3;
     let shown = format!("{}{}", &answer[..start], &answer[block_end..]);
     (shown.trim().to_string(), Some(body.trim().to_string()))
+}
+
+/// Where a block's closing fence starts in `rest`: the first ``` ending its
+/// line, as one quoted in the block (inside a JSON string, its newlines
+/// escaped) never does; else the first at all.
+fn closing_fence(rest: &str) -> Option<usize> {
+    let ends_line = |at: usize| {
+        let after = &rest[at + 3..];
+        after[..after.find('\n').unwrap_or(after.len())]
+            .trim()
+            .is_empty()
+    };
+    rest.match_indices("```")
+        .map(|(at, _)| at)
+        .find(|&at| ends_line(at))
+        .or_else(|| rest.find("```"))
 }
 
 /// Splits Claude's answer into the text to show and the tasks it reported.
@@ -455,6 +471,27 @@ mod tests {
     fn extract_leaves_answers_without_block_alone() {
         assert_eq!(extract("hello"), ("hello".into(), vec![]));
         assert_eq!(extract("```meow-tasks\n[] no end").1, vec![]);
+    }
+
+    #[test]
+    fn a_fence_quoted_inside_the_block_does_not_end_it() {
+        let answer = "Here:\n```meow-x\n{\"prompt\": \"He pasted ```kotlin\\nfun f()\\n``` here\"}\n```\nBye";
+        let (shown, body) = take_fence(answer, "meow-x");
+        assert_eq!(
+            body.as_deref(),
+            Some("{\"prompt\": \"He pasted ```kotlin\\nfun f()\\n``` here\"}")
+        );
+        assert_eq!(shown, "Here:\n\nBye");
+        let one_line = take_fence("```meow-x {\"a\": 1}```", "meow-x");
+        assert_eq!(one_line.1.as_deref(), Some("{\"a\": 1}"));
+        let glued = "```meow-x\n[{\"title\":\"x\"}]```\nSee:\n```bash\nls\n```";
+        assert_eq!(
+            take_fence(glued, "meow-x"),
+            (
+                "See:\n```bash\nls\n```".to_string(),
+                Some("[{\"title\":\"x\"}]".to_string())
+            )
+        );
     }
 
     #[test]
