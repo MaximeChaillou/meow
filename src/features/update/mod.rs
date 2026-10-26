@@ -48,6 +48,8 @@ pub(crate) struct Update {
     /// The installed app and this build's commit; `None` for local builds or
     /// with `MEOW_UPDATE_HOURS=0`, which never update.
     target: Option<(PathBuf, &'static str)>,
+    /// This build's commit, for the menu; `None` for local builds.
+    commit: Option<&'static str>,
     interval: Duration,
     next_at: Instant,
     check: Option<Receiver<Result<Option<Staged>, String>>>,
@@ -66,21 +68,24 @@ impl Update {
         let bundle = std::env::current_exe()
             .ok()
             .and_then(|exe| update::bundle_of(&exe));
-        let why_not = update::why_not_updating(update::own_commit(), bundle.is_some(), interval);
-        let target = match (bundle, update::own_commit(), interval) {
+        let commit = update::own_commit();
+        let why_not = update::why_not_updating(commit, bundle.is_some(), interval);
+        let target = match (bundle, commit, interval) {
             (Some(bundle), Some(own), Some(_)) if !snapshot => Some((bundle, own)),
             _ => None,
         };
-        Self::new(target, interval.unwrap_or(RETRY_DELAY), why_not)
+        Self::new(target, commit, interval.unwrap_or(RETRY_DELAY), why_not)
     }
 
     fn new(
         target: Option<(PathBuf, &'static str)>,
+        commit: Option<&'static str>,
         interval: Duration,
         why_not: Option<&'static str>,
     ) -> Self {
         Self {
             target,
+            commit,
             interval,
             next_at: Instant::now() + FIRST_DELAY,
             check: None,
@@ -222,7 +227,7 @@ impl Feature for Update {
     fn menu(&self) -> Vec<MenuEntry> {
         let inbox = self.inbox.sender();
         vec![
-            MenuEntry::Label(version_label()),
+            MenuEntry::Label(version_label(self.commit)),
             MenuEntry::Action {
                 title: "Check for Updates".to_string(),
                 checked: false,
@@ -241,8 +246,8 @@ fn tell(host: &mut dyn Host, asked: &Asked, message: &str, failed: bool) {
 }
 
 /// "Version 90220bc", for the cat's menu.
-fn version_label() -> String {
-    match update::own_commit() {
+fn version_label(commit: Option<&str>) -> String {
+    match commit {
         Some(commit) => format!("Version {}", update::short(commit)),
         None => "Version: local build".to_string(),
     }

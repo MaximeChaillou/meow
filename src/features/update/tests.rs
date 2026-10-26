@@ -11,16 +11,15 @@ use crate::features::testing::{FakeHost, click, describe};
 const WHY: &str = "This is a local build of Meow: it does not update itself.";
 
 fn local_build() -> Update {
-    Update::new(None, Duration::from_secs(3600), Some(WHY))
+    Update::new(None, None, Duration::from_secs(3600), Some(WHY))
 }
 
 /// A release build with a newer version already unpacked at `staged`.
 fn with_staged(staged: PathBuf) -> Update {
+    let own: &'static str = "a".repeat(40).leak();
     let mut update = Update::new(
-        Some((
-            PathBuf::from("/nonexistent/Meow.app"),
-            "a".repeat(40).leak(),
-        )),
+        Some((PathBuf::from("/nonexistent/Meow.app"), own)),
+        Some(own),
         Duration::from_secs(3600),
         None,
     );
