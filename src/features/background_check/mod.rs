@@ -1,5 +1,5 @@
 //! The background check of tasks: every few minutes, a quiet Claude session
-//! ticks off resolved tasks and adds new ones. It runs next to the chat, never
+//! removes resolved tasks and adds new ones. It runs next to the chat, never
 //! blocks it, and reports in the Tasks header and in Activity.
 
 #[cfg(test)]
@@ -12,7 +12,7 @@ use meow::activity::{self, Kind, Link, Note};
 use meow::claude::{ClaudeEvent, Run};
 use meow::clock;
 use meow::source::Source;
-use meow::{sync, tasks};
+use meow::sync;
 
 use crate::app::feature::{Feature, Host};
 
@@ -66,12 +66,7 @@ impl BackgroundCheck {
         let now = now_secs();
         let prompt = {
             let tasks = host.tasks();
-            sync::prompt(
-                &tasks.open(),
-                &tasks.recently_done(sync::MAX_HANDLED),
-                self.last_ok,
-                now,
-            )
+            sync::prompt(&tasks.open(), &tasks.recently_done(), self.last_ok, now)
         };
         let Some(env) = host.claude() else {
             return;
@@ -123,17 +118,16 @@ impl BackgroundCheck {
                     .filter(|task| !task.is_done())
                     .map(|task| (task.title.clone(), Source::parse(&task.source)))
                     .collect();
-                let new_tasks: Vec<(&str, Source)> = report
-                    .new
+                let new_found = sync::fresh(&report, tasks);
+                let new_tasks: Vec<(&str, Source)> = new_found
                     .iter()
-                    .filter(|found| tasks::id_for(found).is_some() && tasks.find(found).is_none())
                     .map(|found| {
                         let source = found.source.as_deref().map_or(Source::Other, Source::parse);
                         (found.title.as_str(), source)
                     })
                     .collect();
                 let closed = tasks.close_resolved(&report.done, now);
-                let added = tasks.merge(&report.new, now);
+                let added = tasks.merge(&new_found, now);
                 if closed + added > 0 {
                     host.tasks_changed();
                 }

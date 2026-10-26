@@ -29,7 +29,7 @@ up to date as your calendar changes.
 
 **Keeps your to-do list.** Meow gathers what needs you from Slack, GitHub,
 Linear and your mail into one list, sorted by where it comes from. Every few
-minutes it looks again: it adds what's new and ticks off what got done
+minutes it looks again: it adds what's new and removes what got done
 elsewhere, like a pull request merged or an email answered. When you tick a
 task yourself, Meow can draft the reply that says so.
 
