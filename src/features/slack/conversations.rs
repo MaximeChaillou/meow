@@ -591,7 +591,7 @@ impl Slack {
             Event::New { channel, messages } => {
                 self.slack.cache.append(&channel, &messages);
                 self.slack.cache_dirty = true;
-                self.notify_slack(&channel, &messages, host);
+                self.notify_slack(&channel, &messages, &[], host);
                 if self.slack.open.as_deref() == Some(&channel) {
                     let from_others = messages
                         .iter()
@@ -623,6 +623,11 @@ impl Slack {
                     self.slack.thread_messages = messages;
                 }
             }
+            Event::Replies {
+                channel,
+                thread,
+                fresh,
+            } => self.notify_slack(&channel, &fresh, &thread, host),
             Event::Sent { .. } => {}
             Event::Error(message) => {
                 if self.slack.signed_in {
@@ -678,7 +683,14 @@ impl Slack {
     }
 
     /// A DM or a mention from someone else, out of sight, goes to Activity.
-    fn notify_slack(&mut self, channel: &str, messages: &[Message], host: &mut dyn Host) {
+    /// `thread` is the whole thread when `messages` are replies in it.
+    fn notify_slack(
+        &mut self,
+        channel: &str,
+        messages: &[Message],
+        thread: &[Message],
+        host: &mut dyn Host,
+    ) {
         let watching = self.slack_visible(host) && self.slack.open.as_deref() == Some(channel);
         let Some(conversation) = self.slack.channels.iter().find(|c| c.id == channel) else {
             return;
@@ -699,7 +711,7 @@ impl Slack {
         };
         // Even when reading it: preparing the work is what saves time.
         let last = (*last).clone();
-        self.consider_for_autopilot(channel, &last, &title);
+        self.consider_for_autopilot(channel, &last, &title, thread);
         if watching {
             return;
         }

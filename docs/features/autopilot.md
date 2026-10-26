@@ -5,12 +5,14 @@ message asks you for something: "your PR #42 has conflicts", "can you look at
 why the build fails", "send me the numbers for X". Turn it on with **Turn on**
 on the page (it is off by default).
 
-- **Triage:** once a DM, group message or mention has been quiet for 45
-  seconds (so a request written in several messages is read whole), Claude
-  (Haiku, with no tools) reads the conversation's last messages and decides
-  whether there is work to prepare. Greetings, news and decisions only you can
-  make are left alone, as is a conversation you already answered. Add your own
-  rules in `~/.config/meow/autopilot.md`, e.g. "Only for messages from Axel".
+- **Triage:** once a DM, group message or mention (in a thread too) has been
+  quiet for 45 seconds (so a request written in several messages is read
+  whole), Claude (Haiku, with no tools) reads the conversation's last messages
+  (or the thread's) and decides whether there is work to prepare. This works
+  in any conversation, open in Meow or not, and leaves it unread. Greetings,
+  news and decisions only you can make are left alone, as is a conversation
+  you already answered. Add your own rules in `~/.config/meow/autopilot.md`,
+  e.g. "Only for messages from Axel".
 - **Work:** one job at a time, with your usual tools and connectors, on Opus
   (`MEOW_AUTOPILOT_MODEL` picks another). Code work happens in a new git
   worktree of your clone, at the tip of the PR's branch (found with `gh`, the

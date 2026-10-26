@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use super::api::{ApiError, HISTORY_LIMIT, SlackApi};
 use super::auth::Credentials;
 use super::http::{Http, Web};
-use super::model::{Activity, AuthTest, Channel, Message, User};
-use super::socket::{self, Change};
+use super::model::{Activity, AuthTest, Channel, ChannelKind, Message, User};
+use super::socket::{self, Change, Posted};
 
 /// How often an idle worker re-checks the open conversation without the websocket.
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -76,10 +76,18 @@ pub enum Event {
         channel: String,
         messages: Vec<Message>,
     },
-    /// Messages that arrived in the open conversation since last seen.
+    /// Messages that arrived since last seen: in the open conversation, or
+    /// for the user in another one (right after its `History`).
     New {
         channel: String,
         messages: Vec<Message>,
+    },
+    /// New replies for the user in a thread, with the whole thread: its
+    /// parent, then the replies oldest-first.
+    Replies {
+        channel: String,
+        thread: Vec<Message>,
+        fresh: Vec<Message>,
     },
     /// The whole open thread: its parent, then the replies oldest-first. Sent
     /// when it is opened and again whenever it changes.
@@ -235,11 +243,30 @@ struct Pending {
     activity: bool,
     /// The list itself changed.
     relist: bool,
+    /// New messages, to fetch when they are for the user and not shown already.
+    arrivals: Vec<Arrival>,
 }
 
 impl Pending {
     fn any(&self) -> bool {
-        self.history || self.thread || self.activity || self.relist
+        self.history || self.thread || self.activity || self.relist || !self.arrivals.is_empty()
+    }
+}
+
+/// A new message the websocket announced, and where.
+#[derive(Clone, Debug)]
+struct Arrival {
+    channel: String,
+    thread_ts: Option<String>,
+    posted: Posted,
+}
+
+impl Arrival {
+    /// The thread it replies in; `None` for a message in the conversation itself.
+    fn reply_to(&self) -> Option<&str> {
+        self.thread_ts
+            .as_deref()
+            .filter(|thread_ts| *thread_ts != self.posted.ts)
     }
 }
 
@@ -413,7 +440,15 @@ impl<H: Http> Worker<H> {
                 channel,
                 thread_ts,
                 edited,
+                posted,
             } => {
+                if let Some(posted) = posted {
+                    self.pending.arrivals.push(Arrival {
+                        channel: channel.clone(),
+                        thread_ts: thread_ts.clone(),
+                        posted,
+                    });
+                }
                 if self.open.as_deref() == Some(&channel) {
                     self.pending.history = true;
                     self.pending.edited |= edited;
@@ -461,7 +496,102 @@ impl<H: Http> Worker<H> {
             let result = self.refresh_thread();
             retry.thread = self.should_retry(result);
         }
+        // After a relist, so a conversation just joined is known.
+        retry.arrivals = self.fetch_arrivals(pending.arrivals);
         self.pending = retry;
+    }
+
+    /// Fetches the new messages for the user that nothing else fetches (in
+    /// conversations other than the open one, and in threads), so they reach
+    /// Activity and Autopilot. Returns those to try again.
+    fn fetch_arrivals(&mut self, arrivals: Vec<Arrival>) -> Vec<Arrival> {
+        let mut wanted: Vec<Arrival> = arrivals.into_iter().filter(|a| self.wants(a)).collect();
+        // One fetch per conversation or thread, from its earliest new message.
+        wanted.sort_by(|a, b| {
+            (&a.channel, a.reply_to(), &a.posted.ts).cmp(&(&b.channel, b.reply_to(), &b.posted.ts))
+        });
+        wanted.dedup_by(|later, first| {
+            later.channel == first.channel && later.reply_to() == first.reply_to()
+        });
+        wanted
+            .into_iter()
+            .filter(|arrival| {
+                let result = self.fetch_arrival(arrival);
+                self.should_retry(result)
+            })
+            .collect()
+    }
+
+    /// Whether `arrival` is for the user and not already fetched by
+    /// [`Self::fetch_open`]: someone else wrote in a DM or group DM, or
+    /// mentioned the user.
+    fn wants(&self, arrival: &Arrival) -> bool {
+        let Some(me) = self.me.as_deref() else {
+            return false;
+        };
+        let from_others = arrival
+            .posted
+            .user
+            .as_deref()
+            .is_some_and(|user| user != me);
+        let shown = arrival.reply_to().is_none() && self.open.as_deref() == Some(&arrival.channel);
+        if !from_others || shown {
+            return false;
+        }
+        let kind = self
+            .channels
+            .iter()
+            .find(|c| c.id == arrival.channel)
+            .map(|c| c.kind);
+        match kind {
+            Some(ChannelKind::Im | ChannelKind::Mpim) => true,
+            Some(ChannelKind::Channel) | None => arrival.posted.text.contains(&format!("<@{me}>")),
+        }
+    }
+
+    /// Sends what is new from `arrival` on: a thread's replies, or a
+    /// conversation's messages after its whole history. Nothing is marked read.
+    fn fetch_arrival(&mut self, arrival: &Arrival) -> Result<(), ApiError> {
+        let channel = arrival.channel.clone();
+        let since = arrival.posted.ts.as_str();
+        if let Some(thread_ts) = arrival.reply_to() {
+            let thread = self.api.replies(&channel, thread_ts)?;
+            let fresh: Vec<Message> = thread
+                .iter()
+                .filter(|m| m.ts.as_str() >= since && m.ts != thread_ts)
+                .cloned()
+                .collect();
+            if !fresh.is_empty() {
+                let authors = authors(&thread);
+                self.emit(Event::Replies {
+                    channel,
+                    thread,
+                    fresh,
+                });
+                self.resolve_users(&authors);
+            }
+            return Ok(());
+        }
+        let messages = self.api.history(&channel, HISTORY_LIMIT)?;
+        let fresh: Vec<Message> = self
+            .since_seen(&channel, messages.clone())
+            .into_iter()
+            .filter(|m| m.ts.as_str() >= since)
+            .collect();
+        self.remember_latest(&channel, &messages);
+        if !fresh.is_empty() {
+            let authors = authors(&messages);
+            self.emit(Event::History {
+                channel: channel.clone(),
+                messages,
+            });
+            self.emit(Event::New {
+                channel,
+                messages: fresh,
+            });
+            self.resolve_users(&authors);
+        }
+        Ok(())
     }
 
     /// Whether a failed fetch is worth trying again; a fatal failure is reported instead.
@@ -1190,6 +1320,7 @@ mod tests {
             channel: channel.into(),
             thread_ts: thread_ts.map(Into::into),
             edited,
+            posted: None,
         }
     }
 
@@ -1320,6 +1451,146 @@ mod tests {
         worker.on_change(live_message("D9", None, false));
         worker.apply_pending();
         assert_eq!(worker.api.http().count("users.conversations"), 2);
+    }
+
+    fn live_post(
+        channel: &str,
+        thread_ts: Option<&str>,
+        ts: &str,
+        user: &str,
+        text: &str,
+    ) -> Change {
+        Change::Message {
+            channel: channel.into(),
+            thread_ts: thread_ts.map(Into::into),
+            edited: false,
+            posted: Some(Posted {
+                ts: ts.into(),
+                user: Some(user.into()),
+                text: text.into(),
+            }),
+        }
+    }
+
+    fn named_channel(id: &str) -> Channel {
+        Channel {
+            kind: crate::slack::model::ChannelKind::Channel,
+            name: "eng".into(),
+            user: None,
+            ..channel(id, "")
+        }
+    }
+
+    /// A worker signed in as U1, with a DM (D2) and a channel (C1) listed.
+    fn signed_in(router: Router) -> (Worker<Router>, Receiver<Event>) {
+        let (mut worker, rx) = worker(router);
+        worker.me = Some("U1".into());
+        worker.channels = vec![channel("D2", "U2"), named_channel("C1")];
+        worker
+            .known_users
+            .extend(["U1".to_string(), "U2".to_string()]);
+        (worker, rx)
+    }
+
+    #[test]
+    fn a_message_for_me_elsewhere_is_fetched_without_marking_it_read() {
+        let (mut worker, rx) = signed_in(Router::new().on("conversations.history", &[ONE_TWO]));
+        worker.on_change(live_post("D2", None, "2.0", "U2", "two"));
+        worker.apply_pending();
+        let got = events(&rx);
+        let history = got.iter().find_map(|event| match event {
+            Event::History { channel, messages } if channel == "D2" => Some(messages.len()),
+            _ => None,
+        });
+        assert_eq!(
+            history,
+            Some(2),
+            "the conversation is cached whole: {got:?}"
+        );
+        assert_eq!(new_texts(&got), Some(vec!["two".to_string()]));
+        assert_eq!(worker.api.http().count("conversations.mark"), 0);
+    }
+
+    #[test]
+    fn a_message_already_sent_elsewhere_is_not_sent_again() {
+        let (mut worker, rx) =
+            signed_in(Router::new().on("conversations.history", &[ONE_TWO, ONE_TWO]));
+        worker.on_change(live_post("D2", None, "2.0", "U2", "two"));
+        worker.apply_pending();
+        let _ = events(&rx);
+        worker.on_change(live_post("D2", None, "2.0", "U2", "two"));
+        worker.apply_pending();
+        assert_eq!(new_texts(&events(&rx)), None);
+    }
+
+    #[test]
+    fn a_channel_message_without_a_mention_is_not_fetched() {
+        let (mut worker, _rx) = signed_in(Router::new());
+        worker.on_change(live_post("C1", None, "2.0", "U2", "lunch anyone?"));
+        worker.apply_pending();
+        assert_eq!(worker.api.http().count("conversations.history"), 0);
+    }
+
+    #[test]
+    fn a_mention_in_a_channel_is_fetched() {
+        let (mut worker, rx) = signed_in(Router::new().on("conversations.history", &[ONE_TWO]));
+        worker.on_change(live_post("C1", None, "2.0", "U2", "<@U1> can you look?"));
+        worker.apply_pending();
+        assert_eq!(new_texts(&events(&rx)), Some(vec!["two".to_string()]));
+    }
+
+    #[test]
+    fn my_own_message_elsewhere_is_not_fetched() {
+        let (mut worker, _rx) = signed_in(Router::new());
+        worker.on_change(live_post("D2", None, "2.0", "U1", "on it"));
+        worker.apply_pending();
+        assert_eq!(worker.api.http().count("conversations.history"), 0);
+    }
+
+    #[test]
+    fn a_message_in_the_open_conversation_is_fetched_once() {
+        let (mut worker, rx) =
+            signed_in(Router::new().on("conversations.history", &[ONE, ONE_TWO]));
+        worker.open("D2".into());
+        let _ = events(&rx);
+        worker.on_change(live_post("D2", None, "2.0", "U2", "two"));
+        worker.apply_pending();
+        assert_eq!(new_texts(&events(&rx)), Some(vec!["two".to_string()]));
+        assert_eq!(worker.api.http().count("conversations.history"), 2);
+    }
+
+    #[test]
+    fn a_reply_for_me_comes_with_its_thread() {
+        let (mut worker, rx) =
+            signed_in(Router::new().on("conversations.replies", &[LONGER_THREAD]));
+        worker.on_change(live_post("C1", Some("1.0"), "3.0", "U2", "<@U1> and this?"));
+        worker.apply_pending();
+        let got = events(&rx);
+        match got.iter().find(|e| matches!(e, Event::Replies { .. })) {
+            Some(Event::Replies {
+                channel,
+                thread,
+                fresh,
+            }) => {
+                assert_eq!(channel, "C1");
+                assert_eq!(thread.len(), 3);
+                assert_eq!(fresh.len(), 1);
+                assert_eq!(fresh[0].text, "another");
+            }
+            _ => panic!("expected the replies, got {got:?}"),
+        }
+        assert_eq!(new_texts(&got), None);
+    }
+
+    #[test]
+    fn a_failed_fetch_elsewhere_is_tried_again() {
+        let (mut worker, rx) =
+            signed_in(Router::new().on("conversations.history", &["!500", ONE_TWO]));
+        worker.on_change(live_post("D2", None, "2.0", "U2", "two"));
+        worker.apply_pending();
+        assert!(worker.pending.any());
+        worker.apply_pending();
+        assert_eq!(new_texts(&events(&rx)), Some(vec!["two".to_string()]));
     }
 
     #[test]
