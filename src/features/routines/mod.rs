@@ -16,13 +16,10 @@ use meow::activity::{Kind, Note};
 use meow::claude::{ClaudeEvent, Run};
 use meow::conversations::ChatId;
 use meow::routines::{self, Change, Check, Routines, Spec, Trigger};
-use objc2::MainThreadMarker;
-use objc2::rc::Retained;
-use objc2_app_kit::NSView;
-use objc2_foundation::NSRect;
 
 use crate::app::feature::{Feature, Host};
 use crate::app::mailbox::Mailbox;
+use crate::ui::chat_window::{PageKit, PageView};
 use crate::ui::sidebar::PageSpec;
 use crate::ui::theme;
 
@@ -351,24 +348,25 @@ impl Feature for ScheduledTasks {
         shown
     }
 
-    fn page(&self) -> Option<PageSpec> {
-        Some(PageSpec {
+    fn pages(&self) -> Vec<PageSpec> {
+        vec![PageSpec {
             id: PAGE_ID,
             title: "Scheduled",
             badge: theme::link,
-        })
+            order: 45,
+        }]
     }
 
-    fn build_page(&mut self, mtm: MainThreadMarker, frame: NSRect) -> Option<Retained<NSView>> {
+    fn build_page(&mut self, _id: &'static str, kit: &PageKit) -> Option<PageView> {
         let inbox = self.inbox.sender();
-        let page = RoutinesPage::new(mtm, frame, move |id| inbox.send(Msg::Delete(id)));
+        let page = RoutinesPage::new(kit.mtm, kit.frame, move |id| inbox.send(Msg::Delete(id)));
         let view = page.view.clone();
         self.page = Some(page);
         self.dirty = true;
-        Some(view)
+        Some(PageView { view, focus: None })
     }
 
-    fn page_shown(&mut self) {
+    fn page_shown(&mut self, _id: &'static str) {
         self.dirty = true;
     }
 

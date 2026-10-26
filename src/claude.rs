@@ -896,9 +896,15 @@ mod tests {
             matches!(&events[..], [ClaudeEvent::Failed(_)]),
             "{events:?}"
         );
+        // The signal lands, and the orphaned child is reaped, a moment after
+        // `cancel` returns: wait for it rather than look once.
         // SAFETY: signal 0 only checks whether the process exists.
-        let alive = unsafe { libc::kill(pid, 0) } == 0;
-        assert!(!alive, "child of claude survived the cancel");
+        let alive = || unsafe { libc::kill(pid, 0) } == 0;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while alive() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(), "child of claude survived the cancel");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

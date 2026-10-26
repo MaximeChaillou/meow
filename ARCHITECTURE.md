@@ -30,9 +30,11 @@ src/
     background_check/ mod.rs, tests.rs
     daily_actions/    mod.rs, tests.rs
     routines/         mod.rs (state, messages, `impl Feature`), page.rs, tests.rs
+    slack/            mod.rs, one file per part (conversations, assist, voice,
+                      emoji, downloads, events, autopilot), snapshot.rs, tests.rs
     update/           mod.rs, tests.rs
   ui/                 AppKit building blocks: windows, pages, widgets, menus
-    action.rs         an Objective-C target that runs a closure
+    action.rs         Objective-C targets and delegates that run closures
 docs/features/        one page of user documentation per feature
 ```
 
@@ -69,9 +71,14 @@ pub(crate) trait Feature {
     fn read_reply(&mut self, chat: &ChatId, text: &str, done: bool) -> String; // its blocks out
     fn menu(&self) -> Vec<MenuEntry>;                    // cat's menu items
     fn menu_section(&self) -> MenuSection;               // with the cat's, or above Quit
-    fn page(&self) -> Option<PageSpec>;                  // sidebar row
-    fn build_page(&mut self, mtm, frame) -> Option<Retained<NSView>>;  // once, at launch
-    fn page_shown(&mut self);                            // about to be shown
+    fn pages(&self) -> Vec<PageSpec>;                    // sidebar rows, in `order`
+    fn build_page(&mut self, id, kit: &PageKit) -> Option<PageView>;   // once each, at launch
+    fn page_shown(&mut self, id);                        // about to be shown
+    fn open_link(&mut self, link: &Link, host) -> bool;  // an Activity item it shows
+    fn escape(&mut self, host) -> bool;                  // Esc on its page
+    fn quit(&mut self);                                  // save before quitting
+    fn snapshot_steps(&self) -> Vec<&'static str>;       // snapshot mode, by default its pages
+    fn show_snapshot(&mut self, step, host);
     fn is_busy(&self) -> bool;                           // a restart would lose work
     fn thinking(&self) -> bool;                          // the cat shows `…`
 }
@@ -80,7 +87,9 @@ pub(crate) trait Feature {
 Every method but `poll` has a default, so a feature implements only what it
 uses. A feature reaches the rest of the app only through `Host`: write in a
 conversation (and flag it with `!` over the cat), post a banner, record an
-Activity item, get the Claude setup and the calendar tools, read and change
+Activity item (and mark items read), open a page or ask whether one is on
+screen, get the Claude setup and the calendar tools, start and follow coding
+agents, read and change
 the task list (then say it changed), show a status in the Tasks header, read
 the quick actions and their results, update a day plan's agenda, run a quick
 action, read and save its settings,
@@ -125,44 +134,37 @@ exists to retire.
   goes in its own small PR, merged first.
 - Rebase open branches as soon as a core PR lands.
 
-## Migration status
+## What is a feature, and what is the app
 
-Moved to `src/features/`: `update`, `routines`, `appearance` (the coat and
-the window size, from `app/coat.rs`), `background_check` (from `app/sync.rs`),
-`agenda` (today's plan agenda, from `app/agenda.rs`) and `daily_actions` (from
-`app/schedule.rs`).
+Every part that can stand alone is a feature in `src/features/`: `agenda`,
+`appearance`, `background_check`, `daily_actions`, `routines`, `slack` (with
+Autopilot, which works from Slack messages) and `update`.
 
-**What stays in the core.** Some parts are not features but the app itself,
-shared by everything else; they stay in `src/app/`, and features reach them
-through `Host`:
+The rest is the app itself, shared by everything else; it stays in
+`src/app/`, and features reach it through `Host`:
 
 - the chat: conversations and requests (`requests.rs`), quick actions
   (`quick_actions.rs`, a quick action is a kind of conversation) and their
   day plan page with invitation answers (`plan.rs`, `rsvp.rs`);
 - the task list and the Tasks page (`task_actions.rs`), which the chat, plans,
   the background check and Slack all use;
-- Activity (`activity.rs`): six modules write to it, its items open other
-  pages, and it drives the news bubble over the cat;
-- the calendar tools found at launch (`slack_calendar.rs`'s probe), used by
-  Slack, the agenda and invitation answers.
+- Activity (`activity.rs`): features write to it, its items open their pages
+  (`Feature::open_link`), and it drives the news bubble over the cat;
+- coding agents (`agents.rs`), started from the chat's `/agent` and from
+  Slack's panel;
+- the calendar tools found at launch (`calendar.rs`), used by Slack, the
+  agenda and invitation answers.
 
-**Left to move**, one PR each:
+`UiEvent` and `Controller` only carry the app's own controls; features wire
+theirs with closures (`ui::action`). Large views may stay in `src/ui/` (the
+Slack and Autopilot pages do), as long as they report through closures and
+import nothing from `app/` or `features/`.
 
-1. `slack`, as one feature folder with its parts in their own files:
-   conversations, the assist panel, writing style (`slack_voice`), emoji,
-   calendar events and image downloads. It needs from the core a way for
-   Activity items to open a feature's page at a given item.
-2. `agents` and `autopilot`, which depend on Slack: the Slack panel proposes,
-   starts and shows coding agents, and Autopilot reads Slack messages. Moved
-   first, they would leave not-yet-moved Slack code reaching into a feature.
-   Features that react to another's events need a small signal between them
-   (e.g. a new Slack message for Autopilot), passed through the core.
+When one feature needs another's work, it goes through the app: Slack's panel
+starts coding agents through `Host`, and redraws when `Host::agents_revision`
+changes.
 
-`settings::Settings` keeps only the fields of code not moved yet
-(`write_as_me` for Slack, `autopilot`); each moves into its feature's own
-struct with it.
-
-## Module map (library and not yet moved code)
+## Module map (library)
 
 | File                       | Role                                                      |
 |----------------------------|-----------------------------------------------------------|
@@ -194,7 +196,7 @@ struct with it.
 | `src/update.rs`            | Releases: `version.json`, download, staging, swap and relaunch |
 | `src/slack/`               | Live Slack: sign-in credentials, Web API, background client, message model and `mrkdwn` formatting |
 | `src/routines.rs`          | Scheduled tasks: `meow-schedule` parsing, when each is due, prompts |
-| `src/app/`                 | 30 Hz tick tying the cat, chat, hotkey and runs together  |
+| `src/app/`                 | The app: the 30 Hz tick, the windows, the chat, tasks, Activity, agents |
 | `src/ui/`                  | AppKit: speech-bubble window, sidebar, chat/task/plan pages, theme, menus |
 
 Moved features are not listed here: each folder's `mod.rs` comment says what

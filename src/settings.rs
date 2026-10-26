@@ -8,20 +8,9 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-
-/// The settings the app itself owns; features keep theirs in their own types
-/// (e.g. `appearance::Appearance`).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Settings {
-    /// Slack drafts follow the user's learned style guide.
-    pub write_as_me: bool,
-    /// Slack messages asking the user for something start autopilot work.
-    pub autopilot: bool,
-}
 
 /// The settings file, as read at launch.
 #[derive(Debug, Default)]
@@ -101,6 +90,15 @@ pub fn default_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
+
+    /// One owner's fields.
+    #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(default)]
+    struct Settings {
+        write_as_me: bool,
+        autopilot: bool,
+    }
 
     /// Another owner's fields, as a feature would keep them.
     #[derive(Debug, Default, PartialEq, Serialize, Deserialize)]

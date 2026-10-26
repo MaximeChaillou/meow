@@ -88,7 +88,7 @@ fn without_claude_a_due_watch_waits_and_nothing_runs() {
 
 #[test]
 fn registers_the_scheduled_page() {
-    let page = scheduled().page().expect("a page");
+    let page = scheduled().pages()[0];
     assert_eq!((page.id, page.title), (PAGE_ID, "Scheduled"));
 }
 

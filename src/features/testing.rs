@@ -4,17 +4,21 @@
 
 use meow::action_results::ActionResults;
 use meow::actions::QuickAction;
-use meow::activity::Note;
+use meow::activity::{Activity, Note};
+use meow::agent::Proposal;
 use meow::claude::ClaudeEnv;
 use meow::conversations::ChatId;
 use meow::plan::{DayPlan, Event};
 use meow::settings::Store;
 use meow::slack::calendar::CalendarTools;
 use meow::sprites::Coat;
+use meow::superset::Project;
 use meow::tasks::TaskList;
 
+use crate::app::agents::AgentSession;
 use crate::app::feature::Host;
 use crate::ui::menus::MenuEntry;
+use crate::ui::sidebar::Page;
 
 #[derive(Default)]
 pub(crate) struct FakeHost {
@@ -45,6 +49,10 @@ pub(crate) struct FakeHost {
     pub(crate) menu_changes: usize,
     /// Conversations flagged with `!` over the cat.
     pub(crate) unread: Vec<ChatId>,
+    /// Each page asked to open.
+    pub(crate) opened: Vec<Page>,
+    /// How many times `!` was asked for over the cat.
+    pub(crate) alerts: usize,
     pub(crate) idle: bool,
     pub(crate) quit: bool,
 }
@@ -60,6 +68,47 @@ impl Host for FakeHost {
 
     fn flag_unread(&mut self, chat: &ChatId) {
         self.unread.push(chat.clone());
+    }
+
+    fn alert(&mut self) {
+        self.alerts += 1;
+    }
+
+    fn read_activity(&mut self, _about: &dyn Fn(&Activity) -> bool) {}
+
+    fn open_page(&mut self, page: Page) {
+        self.opened.push(page);
+    }
+
+    fn page_visible(&self, _id: &str) -> bool {
+        false
+    }
+
+    fn superset_ready(&self) -> Result<(), String> {
+        Err("no Superset in tests".to_string())
+    }
+
+    fn projects(&self) -> &[Project] {
+        &[]
+    }
+
+    fn discover_superset(&mut self) {}
+
+    fn launch_slack_agent(
+        &mut self,
+        _channel: &str,
+        _request: &str,
+        _proposal: &Proposal,
+    ) -> Result<(), String> {
+        Err("no Superset in tests".to_string())
+    }
+
+    fn slack_agent(&self, _channel: &str) -> Option<&AgentSession> {
+        None
+    }
+
+    fn agents_revision(&self) -> u64 {
+        0
     }
 
     fn notify(&mut self, text: &str) {

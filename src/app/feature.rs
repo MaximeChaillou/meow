@@ -4,20 +4,23 @@
 //! and one line in `features::all`, never a field on `App` or a `UiEvent`.
 
 use meow::actions::QuickAction;
-use meow::activity::Note;
+use meow::activity::{Activity, Link, Note};
+use meow::agent::Proposal;
 use meow::claude::ClaudeEnv;
 use meow::conversations::ChatId;
 use meow::plan::{DayPlan, Event};
 use meow::settings::Store;
 use meow::slack::calendar::CalendarTools;
 use meow::sprites::Coat;
+use meow::superset::Project;
 use meow::tasks::TaskList;
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
-use objc2_app_kit::NSView;
-use objc2_foundation::NSRect;
 
 use super::App;
+use super::agents::{AgentSession, Origin};
+use crate::ui::chat_window::{PageKit, PageView};
+use crate::ui::controller::Controller;
 use crate::ui::menus::{self, MenuEntry, MenuSection};
 use crate::ui::notify;
 use crate::ui::sidebar::{Page, PageSpec};
@@ -60,19 +63,47 @@ pub(crate) trait Feature {
         MenuSection::App
     }
 
-    /// The feature's page in the sidebar, if it has one.
-    fn page(&self) -> Option<PageSpec> {
+    /// The feature's pages in the sidebar.
+    fn pages(&self) -> Vec<PageSpec> {
+        Vec::new()
+    }
+
+    /// Builds page `id`'s view, in `frame` of the chat bubble. Called once
+    /// for each of `pages`, at launch.
+    fn build_page(&mut self, _id: &'static str, _kit: &PageKit) -> Option<PageView> {
         None
     }
 
-    /// Builds the page's view, in `frame` of the chat bubble. Called once,
-    /// for a feature with a `page`.
-    fn build_page(&mut self, _mtm: MainThreadMarker, _frame: NSRect) -> Option<Retained<NSView>> {
-        None
+    /// Page `id` is about to be shown.
+    fn page_shown(&mut self, _id: &'static str) {}
+
+    /// An Activity item was clicked: whether this feature shows what `link`
+    /// is about.
+    fn open_link(&mut self, _link: &Link, _host: &mut dyn Host) -> bool {
+        false
     }
 
-    /// The page is about to be shown.
-    fn page_shown(&mut self) {}
+    /// Esc was pressed on one of the feature's pages: whether it did
+    /// something with it (closing a panel, going back) rather than letting
+    /// the bubble close.
+    fn escape(&mut self, _host: &mut dyn Host) -> bool {
+        false
+    }
+
+    /// Meow is quitting: save what must not be lost.
+    fn quit(&mut self) {}
+
+    /// The steps the feature adds to snapshot mode, each saved as
+    /// `<step>.png`: by default its pages.
+    fn snapshot_steps(&self) -> Vec<&'static str> {
+        self.pages().iter().map(|page| page.id).collect()
+    }
+
+    /// Shows snapshot step `step`, with sample data rather than the user's
+    /// when it has any.
+    fn show_snapshot(&mut self, step: &'static str, host: &mut dyn Host) {
+        host.open_page(Page::Feature(step));
+    }
 
     /// Work under way that a restart would lose.
     fn is_busy(&self) -> bool {
@@ -93,12 +124,42 @@ pub(crate) trait Host {
     /// Shows `!` over the cat until conversation `chat` is seen, unless it is
     /// on screen already.
     fn flag_unread(&mut self, chat: &ChatId);
+    /// Shows `!` over the cat until the bubble is opened.
+    fn alert(&mut self);
     /// A macOS banner.
     fn notify(&mut self, text: &str);
     /// Something that happened, for the Activity page (with a banner).
     fn record(&mut self, note: Note);
+    /// Marks the Activity items `about` matches as read.
+    fn read_activity(&mut self, about: &dyn Fn(&Activity) -> bool);
+    /// Opens the chat bubble on `page`.
+    fn open_page(&mut self, page: Page);
+    /// Whether the chat bubble is open on feature page `id`.
+    fn page_visible(&self, id: &str) -> bool;
+    /// Whether coding agents can be started now, or why not.
+    fn superset_ready(&self) -> Result<(), String>;
+    /// The Superset projects agents can work in.
+    fn projects(&self) -> &[Project];
+    /// Looks for Superset and its projects again, in the background.
+    fn discover_superset(&mut self);
+    /// Starts `proposal`'s coding agent for Slack conversation `channel`.
+    fn launch_slack_agent(
+        &mut self,
+        channel: &str,
+        request: &str,
+        proposal: &Proposal,
+    ) -> Result<(), String>;
+    /// The coding agent followed for Slack conversation `channel`.
+    fn slack_agent(&self, channel: &str) -> Option<&AgentSession>;
+    /// Changes each time a coding agent moves on, to know when to redraw.
+    fn agents_revision(&self) -> u64;
     /// The Claude Code setup, once found; `None` before or without one.
     fn claude(&self) -> Option<&ClaudeEnv>;
+    /// The Claude Code setup, or why there is none, to tell the user.
+    fn claude_or_why(&self) -> Result<&ClaudeEnv, String> {
+        self.claude()
+            .ok_or_else(|| "Claude is still starting; try again in a moment.".to_string())
+    }
     /// The calendar tools of the user's Claude Code, once found.
     fn calendar_tools(&self) -> Option<&CalendarTools>;
     /// The quick actions, as configured.
@@ -157,8 +218,57 @@ impl Host for AppHost<'_> {
         self.app.flag_unread(chat);
     }
 
+    fn alert(&mut self) {
+        self.app.unread = true;
+    }
+
     fn notify(&mut self, text: &str) {
         notify::post("Meow", text);
+    }
+
+    fn read_activity(&mut self, about: &dyn Fn(&Activity) -> bool) {
+        self.app.read_activity(about);
+    }
+
+    fn open_page(&mut self, page: Page) {
+        self.app.open_page(page);
+    }
+
+    fn page_visible(&self, id: &str) -> bool {
+        self.app.chat.is_visible()
+            && matches!(self.app.chat.page(), Page::Feature(shown) if shown == id)
+    }
+
+    fn superset_ready(&self) -> Result<(), String> {
+        self.app.superset_ready()
+    }
+
+    fn projects(&self) -> &[Project] {
+        self.app.projects()
+    }
+
+    fn discover_superset(&mut self) {
+        self.app.discover_superset();
+    }
+
+    fn launch_slack_agent(
+        &mut self,
+        channel: &str,
+        request: &str,
+        proposal: &Proposal,
+    ) -> Result<(), String> {
+        let origin = Origin::Slack {
+            channel: channel.to_string(),
+        };
+        self.app.launch_agent(origin, request, proposal)
+    }
+
+    fn slack_agent(&self, channel: &str) -> Option<&AgentSession> {
+        self.app.slack_agent(channel)
+    }
+
+    fn agents_revision(&self) -> u64 {
+        self.app.agents_revision()
     }
 
     fn settings(&mut self) -> &mut Store {
@@ -236,6 +346,17 @@ impl Host for AppHost<'_> {
         self.app.claude.as_ref()?.as_ref().ok()
     }
 
+    fn claude_or_why(&self) -> Result<&ClaudeEnv, String> {
+        if self.app.snapshot.is_some() {
+            return Err("Snapshots do not run Claude.".to_string());
+        }
+        match &self.app.claude {
+            Some(Ok(env)) => Ok(env),
+            Some(Err(error)) => Err(format!("Claude is not available: {error}")),
+            None => Err("Claude is still starting; try again in a moment.".to_string()),
+        }
+    }
+
     fn set_badge(&mut self, page: &'static str, count: usize) {
         self.app.chat.set_badge(page, count);
     }
@@ -244,8 +365,9 @@ impl Host for AppHost<'_> {
         !self.others_busy && self.app.is_idle()
     }
 
+    /// Done once the features are back in the app, so each can save first.
     fn quit(&mut self) {
-        self.app.quit();
+        self.app.quitting = true;
     }
 }
 
@@ -267,8 +389,16 @@ impl App {
             });
         }
         self.features = features;
+        self.after_features();
+    }
+
+    /// What features asked for while they were out of `self`.
+    fn after_features(&mut self) {
         if std::mem::take(&mut self.menu_changed) {
             self.fill_cat_menu();
+        }
+        if std::mem::take(&mut self.quitting) {
+            self.quit();
         }
     }
 
@@ -342,10 +472,63 @@ impl App {
         if let Page::Feature(id) = page {
             self.features
                 .iter_mut()
-                .filter(|f| f.page().is_some_and(|spec| spec.id == id))
-                .for_each(|f| f.page_shown());
+                .filter(|f| f.pages().iter().any(|spec| spec.id == id))
+                .for_each(|f| f.page_shown(id));
         }
         self.chat.show_page(page);
+    }
+
+    /// Runs `each` on the features, with the app as their host, until one
+    /// returns true; whether one did. As in `poll_features`, they are out of
+    /// `self` meanwhile.
+    fn with_features(
+        &mut self,
+        mut each: impl FnMut(&mut dyn Feature, &mut dyn Host) -> bool,
+    ) -> bool {
+        let mut features = std::mem::take(&mut self.features);
+        let done = features.iter_mut().any(|feature| {
+            let mut host = AppHost {
+                app: self,
+                others_busy: false,
+            };
+            each(feature.as_mut(), &mut host)
+        });
+        self.features = features;
+        self.after_features();
+        done
+    }
+
+    /// Whether a feature shows what Activity `link` is about.
+    pub(super) fn features_open_link(&mut self, link: &Link) -> bool {
+        self.with_features(|feature, host| feature.open_link(link, host))
+    }
+
+    /// Whether a feature did something with Esc on its page.
+    pub(super) fn features_escape(&mut self) -> bool {
+        self.with_features(|feature, host| feature.escape(host))
+    }
+
+    pub(super) fn features_quit(&mut self) {
+        self.features.iter_mut().for_each(|feature| feature.quit());
+    }
+
+    /// The snapshot steps the features add, in their order.
+    pub(super) fn feature_snapshot_steps(&self) -> Vec<&'static str> {
+        self.features
+            .iter()
+            .flat_map(|feature| feature.snapshot_steps())
+            .collect()
+    }
+
+    /// Shows snapshot step `step`, through the feature that adds it.
+    pub(super) fn show_feature_snapshot(&mut self, step: &'static str) {
+        self.with_features(|feature, host| {
+            let owns = feature.snapshot_steps().contains(&step);
+            if owns {
+                feature.show_snapshot(step, host);
+            }
+            owns
+        });
     }
 
     /// Nothing outside the features that a restart would lose.
@@ -353,7 +536,6 @@ impl App {
         self.runs.is_empty()
             && !self.chat.is_visible()
             && !self.rsvp.is_running()
-            && self.slack_assist.run.is_none()
             && !self.agents.is_running()
     }
 }
@@ -362,15 +544,20 @@ impl App {
 /// lists them (see `ChatWindow::new`).
 pub(super) fn attach_pages(
     mtm: MainThreadMarker,
+    controller: &Retained<Controller>,
     features: &mut [Box<dyn Feature>],
     chat: &crate::ui::chat_window::ChatWindow,
 ) {
+    let kit = PageKit {
+        mtm,
+        frame: chat.page_frame(),
+        controller,
+    };
     for feature in features {
-        let Some(spec) = feature.page() else {
-            continue;
-        };
-        if let Some(view) = feature.build_page(mtm, chat.page_frame()) {
-            chat.add_page(spec.id, &view);
+        for spec in feature.pages() {
+            if let Some(page) = feature.build_page(spec.id, &kit) {
+                chat.add_page(spec.id, page);
+            }
         }
     }
 }

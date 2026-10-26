@@ -1,5 +1,5 @@
-//! Left column of the bubble: title, pages (Chat, Tasks, Slack, Activity,
-//! then the features' pages) and the quick actions.
+//! Left column of the bubble: title, pages (Chat, Tasks, Activity and the
+//! features' pages, in their order) and the quick actions.
 
 use std::cell::Cell;
 
@@ -47,12 +47,8 @@ pub enum Page {
     Tasks,
     /// The day plan of the quick action shown.
     Plan,
-    /// Slack conversations.
-    Slack,
     /// What happened in the background.
     Activity,
-    /// Work started from Slack messages, and what waits for approval.
-    Autopilot,
     /// A feature's page, by the id in its `PageSpec`.
     Feature(&'static str),
 }
@@ -62,9 +58,7 @@ pub enum Page {
 pub enum Selection {
     Chat,
     Tasks,
-    Slack,
     Activity,
-    Autopilot,
     Feature(&'static str),
     Action(usize),
 }
@@ -78,7 +72,15 @@ pub struct PageSpec {
     pub title: &'static str,
     /// The fill of the count chip at the end of its row.
     pub badge: fn() -> Retained<NSColor>,
+    /// Where its row goes among the others, smallest first: the app's own
+    /// are Chat at 10, Tasks at 20 and Activity at 40.
+    pub order: u8,
 }
+
+/// The places of the app's own rows (see `PageSpec::order`).
+const CHAT_ORDER: u8 = 10;
+const TASKS_ORDER: u8 = 20;
+const ACTIVITY_ORDER: u8 = 40;
 
 /// A feature page's row: its button, count chip and count.
 struct FeatureRow {
@@ -98,19 +100,14 @@ pub struct Sidebar {
     tasks_badge: Retained<NSTextField>,
     /// The unread activity count, an orange chip at the end of the Activity row.
     activity_badge: Retained<NSTextField>,
-    /// The jobs waiting for approval, an orange chip at the end of the Autopilot row.
-    autopilot_badge: Retained<NSTextField>,
     chat: Retained<NSButton>,
     tasks: Retained<NSButton>,
-    slack: Retained<NSButton>,
     activity: Retained<NSButton>,
-    autopilot: Retained<NSButton>,
     pages: Vec<FeatureRow>,
     actions: Vec<(Retained<NSButton>, String)>,
     selected: Cell<Selection>,
     open_tasks: Cell<usize>,
     unread_activity: Cell<usize>,
-    waiting_jobs: Cell<usize>,
     busy: Cell<bool>,
 }
 
@@ -152,40 +149,51 @@ impl Sidebar {
         view.addSubview(&title);
 
         let target: &AnyObject = controller;
-        let mut y = TITLE_HEIGHT + PADDING;
-        let chat = borderless_button(mtm, target, sel!(showChat:), y, NAV_HEIGHT);
-        y += NAV_HEIGHT;
-        let tasks = borderless_button(mtm, target, sel!(showTasks:), y, NAV_HEIGHT);
-        y += NAV_HEIGHT;
-        let slack = borderless_button(mtm, target, sel!(showSlack:), y, NAV_HEIGHT);
-        y += NAV_HEIGHT;
-        let activity = borderless_button(mtm, target, sel!(showActivity:), y, NAV_HEIGHT);
-        y += NAV_HEIGHT;
-        let autopilot = borderless_button(mtm, target, sel!(showAutopilot:), y, NAV_HEIGHT);
-        y += NAV_HEIGHT;
-        view.addSubview(&chat);
-        view.addSubview(&tasks);
-        view.addSubview(&slack);
-        view.addSubview(&activity);
-        view.addSubview(&autopilot);
-        let pages: Vec<_> = pages
+        let chat = borderless_button(mtm, target, sel!(showChat:), 0.0, NAV_HEIGHT);
+        let tasks = borderless_button(mtm, target, sel!(showTasks:), 0.0, NAV_HEIGHT);
+        let activity = borderless_button(mtm, target, sel!(showActivity:), 0.0, NAV_HEIGHT);
+        let feature_buttons: Vec<_> = pages
             .iter()
-            .map(|&spec| {
-                let row = feature_row(mtm, spec, y);
-                view.addSubview(&row.button);
-                view.addSubview(&row.badge);
-                y += NAV_HEIGHT;
-                row
-            })
+            .map(|&spec| (spec, feature_button(mtm, spec)))
             .collect();
+        // The rows top to bottom, the app's own among the features' by order.
+        let mut rows: Vec<(u8, &NSButton)> = vec![
+            (CHAT_ORDER, &chat),
+            (TASKS_ORDER, &tasks),
+            (ACTIVITY_ORDER, &activity),
+        ];
+        rows.extend(
+            feature_buttons
+                .iter()
+                .map(|(spec, (button, _))| (spec.order, &**button)),
+        );
+        rows.sort_by_key(|&(order, _)| order);
+        let mut y = TITLE_HEIGHT + PADDING;
+        for (_, button) in rows {
+            button.setFrameOrigin(NSPoint::new(PADDING, y));
+            view.addSubview(button);
+            y += NAV_HEIGHT;
+        }
         y += SECTION_GAP;
 
         let tasks_badge = badge(mtm, &tasks, &theme::highlight());
         view.addSubview(&tasks_badge);
         let activity_badge = badge(mtm, &activity, &theme::accent());
         view.addSubview(&activity_badge);
-        let autopilot_badge = badge(mtm, &autopilot, &theme::accent());
-        view.addSubview(&autopilot_badge);
+        let pages: Vec<_> = feature_buttons
+            .into_iter()
+            .map(|(spec, (button, action))| {
+                let badge = badge(mtm, &button, &(spec.badge)());
+                view.addSubview(&badge);
+                FeatureRow {
+                    spec,
+                    button,
+                    badge,
+                    count: Cell::new(0),
+                    _action: action,
+                }
+            })
+            .collect();
 
         if !actions.is_empty() {
             let label = NSTextField::labelWithString(&NSString::from_str("QUICK ACTIONS"), mtm);
@@ -232,18 +240,14 @@ impl Sidebar {
             title,
             tasks_badge,
             activity_badge,
-            autopilot_badge,
             chat,
             tasks,
-            slack,
             activity,
-            autopilot,
             pages,
             actions: action_buttons,
             selected: Cell::new(Selection::Chat),
             open_tasks: Cell::new(0),
             unread_activity: Cell::new(0),
-            waiting_jobs: Cell::new(0),
             busy: Cell::new(false),
         };
         sidebar.refresh();
@@ -266,11 +270,6 @@ impl Sidebar {
             row.count.set(count);
             self.refresh();
         }
-    }
-
-    pub fn set_waiting_jobs(&self, count: usize) {
-        self.waiting_jobs.set(count);
-        self.refresh();
     }
 
     pub fn set_unread_activity(&self, count: usize) {
@@ -307,14 +306,11 @@ impl Sidebar {
         ));
         set_badge(&self.tasks_badge, self.open_tasks.get());
         set_badge(&self.activity_badge, self.unread_activity.get());
-        set_badge(&self.autopilot_badge, self.waiting_jobs.get());
         let selected = self.selected.get();
         let pages = [
             (&self.chat, "Chat", Selection::Chat),
             (&self.tasks, "Tasks", Selection::Tasks),
-            (&self.slack, "Slack", Selection::Slack),
             (&self.activity, "Activity", Selection::Activity),
-            (&self.autopilot, "Autopilot", Selection::Autopilot),
         ];
         let features = self.pages.iter().map(|row| {
             set_badge(&row.badge, row.count.get());
@@ -419,19 +415,13 @@ fn sprite_image(frame: &sprites::Frame, height: f64) -> Option<Retained<NSImage>
     Some(image)
 }
 
-/// The row of a feature's page at `y`: clicking it shows the page.
-fn feature_row(mtm: MainThreadMarker, spec: PageSpec, y: f64) -> FeatureRow {
+/// The button of a feature page's row, and its target: clicking it shows
+/// the page.
+fn feature_button(mtm: MainThreadMarker, spec: PageSpec) -> (Retained<NSButton>, Retained<Action>) {
     let page = Page::Feature(spec.id);
     let action = Action::new(mtm, move || events::push(UiEvent::ShowPage(page)));
-    let button = borderless_button(mtm, &action, Action::selector(), y, NAV_HEIGHT);
-    let badge = badge(mtm, &button, &(spec.badge)());
-    FeatureRow {
-        spec,
-        button,
-        badge,
-        count: Cell::new(0),
-        _action: action,
-    }
+    let button = borderless_button(mtm, &action, Action::selector(), 0.0, NAV_HEIGHT);
+    (button, action)
 }
 
 fn borderless_button(

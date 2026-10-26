@@ -6,15 +6,14 @@ use std::cell::RefCell;
 
 use meow::autopilot::{self, Action, ActionState, Job, Jobs, Stage};
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
-use objc2::{MainThreadMarker, MainThreadOnly, sel};
+use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSColor, NSScrollView, NSTextAlignment, NSTextField, NSView,
 };
 use objc2_foundation::{NSAttributedString, NSPoint, NSRect, NSSize, NSString};
 
+use super::action::{Action as Target, ActionSink};
 use super::bubble;
-use super::controller::Controller;
 use super::flipped::FlippedView;
 use super::rich_text::{self, Attributes};
 use super::theme;
@@ -36,21 +35,43 @@ const ACTION_INSET: f64 = 14.0;
 const WAITING_BORDER: f64 = 2.0;
 /// Longest a held call's details are shown.
 const MAX_DETAIL_CHARS: usize = 700;
-/// Action buttons carry `job row * TAG_STRIDE + action index`.
+/// Held actions are named `job row * TAG_STRIDE + action index`.
 pub const TAG_STRIDE: usize = 1000;
+
+/// The Autopilot page's id among the features' pages.
+pub const PAGE_ID: &str = "autopilot";
+
+/// What the Autopilot page's controls ask for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutopilotAction {
+    /// Turn Autopilot on or off.
+    Toggle,
+    /// Approve or reject a held action: job row × `TAG_STRIDE` + action index.
+    Approve(usize),
+    Reject(usize),
+    /// Remove the job in this row.
+    Dismiss(usize),
+    /// Show the worktree of the job in this row.
+    OpenFolder(usize),
+}
 
 pub struct AutopilotPage {
     pub view: Retained<NSView>,
     scroll: Retained<NSScrollView>,
     list: Retained<FlippedView>,
-    target: Retained<Controller>,
+    /// The targets of the page's controls, all drawn again with it.
+    actions: ActionSink<AutopilotAction>,
     /// Job ids in the order shown; buttons carry an index into it.
     shown_ids: RefCell<Vec<u64>>,
     mtm: MainThreadMarker,
 }
 
 impl AutopilotPage {
-    pub fn new(mtm: MainThreadMarker, controller: &Retained<Controller>, frame: NSRect) -> Self {
+    pub fn new(
+        mtm: MainThreadMarker,
+        frame: NSRect,
+        on_action: impl Fn(AutopilotAction) + 'static,
+    ) -> Self {
         let view = NSView::initWithFrame(NSView::alloc(mtm), frame);
         view.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
@@ -75,7 +96,7 @@ impl AutopilotPage {
             view,
             scroll,
             list,
-            target: controller.clone(),
+            actions: ActionSink::new(mtm, on_action),
             shown_ids: RefCell::new(Vec::new()),
             mtm,
         }
@@ -92,6 +113,7 @@ impl AutopilotPage {
         for row in self.list.subviews().iter() {
             row.removeFromSuperview();
         }
+        self.actions.clear();
         let mut y = self.add_switch(enabled, width);
         let mut ids = Vec::new();
         for job in jobs.all() {
@@ -105,7 +127,6 @@ impl AutopilotPage {
 
     /// What Autopilot does, and the button turning it on or off. Returns the y below.
     fn add_switch(&self, enabled: bool, width: f64) -> f64 {
-        let target: &AnyObject = &self.target;
         let hint = if enabled {
             "On: when a Slack message asks you for something, Claude prepares it here. \
              Nothing that can't be undone (a push, a message sent, an issue changed) \
@@ -130,7 +151,8 @@ impl AutopilotPage {
         } else {
             ("Turn on", widgets::ButtonStyle::Go)
         };
-        let toggle = widgets::text_button(self.mtm, label, style, target, sel!(toggleAutopilot:));
+        let target = self.actions.target(AutopilotAction::Toggle);
+        let toggle = widgets::text_button(self.mtm, label, style, &target, Target::selector());
         toggle.setFrame(rect(
             width - INDENT - TOGGLE_WIDTH,
             0.0,
@@ -145,7 +167,6 @@ impl AutopilotPage {
     /// A card: title, status and ×; who asked what; the work's summary; then
     /// each held action. Returns the y below.
     fn add_job(&self, row: usize, job: &Job, width: f64, y: f64, now: u64) -> f64 {
-        let target: &AnyObject = &self.target;
         let card = FlippedView::new(self.mtm, rect(0.0, y, width, 0.0));
         card.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
         self.list.addSubview(&card);
@@ -174,10 +195,9 @@ impl AutopilotPage {
             self.mtm,
             "×",
             widgets::ButtonStyle::Link,
-            target,
-            sel!(dismissAutopilot:),
+            &self.actions.target(AutopilotAction::Dismiss(row)),
+            Target::selector(),
         );
-        delete.setTag(row as isize);
         delete.setToolTip(Some(&NSString::from_str(
             "Remove this job, and its worktree",
         )));
@@ -208,10 +228,9 @@ impl AutopilotPage {
                 self.mtm,
                 "Open folder",
                 widgets::ButtonStyle::Link,
-                target,
-                sel!(openAutopilotFolder:),
+                &self.actions.target(AutopilotAction::OpenFolder(row)),
+                Target::selector(),
             );
-            open.setTag(row as isize);
             open.setFrame(rect(
                 width - 2.0 * INDENT - FOLDER_WIDTH,
                 top,
@@ -261,7 +280,6 @@ impl AutopilotPage {
     /// A held action: what it does and its details, with Approve and Reject
     /// while it waits, else how it went. Returns the y below.
     fn add_action(&self, tag: usize, action: &Action, width: f64, y: f64) -> f64 {
-        let target: &AnyObject = &self.target;
         let (what, detail) = autopilot::describe(&action.call);
         let x = 2.0 * INDENT + ACTION_INSET;
         let buttons_width = 2.0 * BUTTON_WIDTH + BUTTON_GAP;
@@ -284,17 +302,22 @@ impl AutopilotPage {
         match action.state {
             ActionState::Pending => {
                 let buttons = [
-                    ("Approve", widgets::ButtonStyle::Go, sel!(approveAutopilot:)),
+                    (
+                        "Approve",
+                        widgets::ButtonStyle::Go,
+                        AutopilotAction::Approve(tag),
+                    ),
                     (
                         "Reject",
                         widgets::ButtonStyle::Quiet,
-                        sel!(rejectAutopilot:),
+                        AutopilotAction::Reject(tag),
                     ),
                 ];
                 let mut x = right - buttons_width;
-                for (label, style, selector) in buttons {
-                    let button = widgets::text_button(self.mtm, label, style, target, selector);
-                    button.setTag(tag as isize);
+                for (label, style, choice) in buttons {
+                    let target = self.actions.target(choice);
+                    let button =
+                        widgets::text_button(self.mtm, label, style, &target, Target::selector());
                     button.setFrame(rect(x, y, BUTTON_WIDTH, ROW_HEIGHT));
                     button.setAutoresizingMask(pin);
                     self.list.addSubview(&button);
