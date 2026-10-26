@@ -296,6 +296,8 @@ struct Worker<H: Http> {
     thread: Option<OpenThread>,
     /// Latest message ts applied per conversation.
     seen: HashMap<String, String>,
+    /// Latest reply ts sent per thread, by conversation and parent ts.
+    replies_seen: HashMap<(String, String), String>,
     /// Users whose names have already been sent, or were known from the cache.
     known_users: HashSet<String>,
     /// Everything known about those users, for `People` without a lookup.
@@ -318,6 +320,7 @@ impl<H: Http> Worker<H> {
             open: None,
             thread: None,
             seen: HashMap::new(),
+            replies_seen: HashMap::new(),
             known_users: HashSet::new(),
             users: HashMap::new(),
             listed: Instant::now(),
@@ -497,14 +500,18 @@ impl<H: Http> Worker<H> {
             retry.thread = self.should_retry(result);
         }
         // After a relist, so a conversation just joined is known.
-        retry.arrivals = self.fetch_arrivals(pending.arrivals);
+        retry.arrivals = self.fetch_arrivals(pending.arrivals, retry.relist);
         self.pending = retry;
     }
 
     /// Fetches the new messages for the user that nothing else fetches (in
     /// conversations other than the open one, and in threads), so they reach
-    /// Activity and Autopilot. Returns those to try again.
-    fn fetch_arrivals(&mut self, arrivals: Vec<Arrival>) -> Vec<Arrival> {
+    /// Activity and Autopilot. Returns those to try again, with those in a
+    /// conversation not listed yet while `relisting` is still to be done.
+    fn fetch_arrivals(&mut self, arrivals: Vec<Arrival>, relisting: bool) -> Vec<Arrival> {
+        let (unlisted, arrivals): (Vec<Arrival>, Vec<Arrival>) = arrivals
+            .into_iter()
+            .partition(|a| relisting && self.kind_of(&a.channel).is_none());
         let mut wanted: Vec<Arrival> = arrivals.into_iter().filter(|a| self.wants(a)).collect();
         // One fetch per conversation or thread, from its earliest new message.
         wanted.sort_by(|a, b| {
@@ -513,40 +520,51 @@ impl<H: Http> Worker<H> {
         wanted.dedup_by(|later, first| {
             later.channel == first.channel && later.reply_to() == first.reply_to()
         });
-        wanted
+        let failed: Vec<Arrival> = wanted
             .into_iter()
             .filter(|arrival| {
                 let result = self.fetch_arrival(arrival);
                 self.should_retry(result)
             })
-            .collect()
+            .collect();
+        unlisted.into_iter().chain(failed).collect()
     }
 
-    /// Whether `arrival` is for the user and not already fetched by
-    /// [`Self::fetch_open`]: someone else wrote in a DM or group DM, or
-    /// mentioned the user.
+    /// Whether to fetch `arrival`, which [`Self::fetch_open`] does not: someone
+    /// else wrote in a DM or group DM or mentioned the user, or the user
+    /// answered where such a message was sent (so the app sees it answered).
     fn wants(&self, arrival: &Arrival) -> bool {
-        let Some(me) = self.me.as_deref() else {
+        let (Some(me), Some(author)) = (self.me.as_deref(), arrival.posted.user.as_deref()) else {
             return false;
         };
-        let from_others = arrival
-            .posted
-            .user
-            .as_deref()
-            .is_some_and(|user| user != me);
-        let shown = arrival.reply_to().is_none() && self.open.as_deref() == Some(&arrival.channel);
-        if !from_others || shown {
+        if arrival.reply_to().is_none() && self.open.as_deref() == Some(&arrival.channel) {
             return false;
         }
-        let kind = self
-            .channels
-            .iter()
-            .find(|c| c.id == arrival.channel)
-            .map(|c| c.kind);
-        match kind {
+        if author == me {
+            return self.sent_before(arrival);
+        }
+        match self.kind_of(&arrival.channel) {
             Some(ChannelKind::Im | ChannelKind::Mpim) => true,
             Some(ChannelKind::Channel) | None => arrival.posted.text.contains(&format!("<@{me}>")),
         }
+    }
+
+    /// Whether messages of `arrival`'s conversation or thread were sent already.
+    fn sent_before(&self, arrival: &Arrival) -> bool {
+        match arrival.reply_to() {
+            Some(thread_ts) => self
+                .replies_seen
+                .contains_key(&(arrival.channel.clone(), thread_ts.to_string())),
+            None => self.seen.contains_key(&arrival.channel),
+        }
+    }
+
+    /// The kind of a listed conversation.
+    fn kind_of(&self, channel: &str) -> Option<ChannelKind> {
+        self.channels
+            .iter()
+            .find(|c| c.id == channel)
+            .map(|c| c.kind)
     }
 
     /// Sends what is new from `arrival` on: a thread's replies, or a
@@ -556,19 +574,22 @@ impl<H: Http> Worker<H> {
         let since = arrival.posted.ts.as_str();
         if let Some(thread_ts) = arrival.reply_to() {
             let thread = self.api.replies(&channel, thread_ts)?;
+            let key = (channel.clone(), thread_ts.to_string());
+            let last_sent = self.replies_seen.get(&key).map(String::as_str);
             let fresh: Vec<Message> = thread
                 .iter()
                 .filter(|m| m.ts.as_str() >= since && m.ts != thread_ts)
+                .filter(|m| last_sent.is_none_or(|last| m.ts.as_str() > last))
                 .cloned()
                 .collect();
-            if !fresh.is_empty() {
-                let authors = authors(&thread);
+            if let Some(last) = fresh.last() {
+                self.replies_seen.insert(key, last.ts.clone());
+                self.resolve_users(&authors(&thread));
                 self.emit(Event::Replies {
                     channel,
                     thread,
                     fresh,
                 });
-                self.resolve_users(&authors);
             }
             return Ok(());
         }
@@ -580,7 +601,7 @@ impl<H: Http> Worker<H> {
             .collect();
         self.remember_latest(&channel, &messages);
         if !fresh.is_empty() {
-            let authors = authors(&messages);
+            self.resolve_users(&authors(&messages));
             self.emit(Event::History {
                 channel: channel.clone(),
                 messages,
@@ -589,7 +610,6 @@ impl<H: Http> Worker<H> {
                 channel,
                 messages: fresh,
             });
-            self.resolve_users(&authors);
         }
         Ok(())
     }
@@ -1581,6 +1601,91 @@ mod tests {
         }
         assert_eq!(new_texts(&got), None);
     }
+
+    /// The `fresh` texts of each `Replies` event.
+    fn fresh_replies(events: &[Event]) -> Vec<Vec<String>> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Replies { fresh, .. } => {
+                    Some(fresh.iter().map(|m| m.text.clone()).collect())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn replies_already_sent_are_not_sent_again() {
+        let (mut worker, rx) =
+            signed_in(Router::new().on("conversations.replies", &[LONGER_THREAD, LONGER_THREAD]));
+        worker.on_change(live_post("D2", Some("1.0"), "2.0", "U2", "reply"));
+        worker.apply_pending();
+        worker.on_change(live_post("D2", Some("1.0"), "3.0", "U2", "another"));
+        worker.apply_pending();
+        assert_eq!(fresh_replies(&events(&rx)), [vec!["reply", "another"]]);
+    }
+
+    #[test]
+    fn my_answer_where_something_was_sent_is_sent_too() {
+        let (mut worker, rx) =
+            signed_in(Router::new().on("conversations.history", &[ONE, ONE_AND_MY_ANSWER]));
+        worker.on_change(live_post("D2", None, "1.0", "U2", "one"));
+        worker.apply_pending();
+        let _ = events(&rx);
+        worker.on_change(live_post("D2", None, "2.0", "U1", "done"));
+        worker.apply_pending();
+        assert_eq!(new_texts(&events(&rx)), Some(vec!["done".to_string()]));
+    }
+
+    #[test]
+    fn my_answer_in_a_thread_already_sent_is_sent_too() {
+        let (mut worker, rx) =
+            signed_in(Router::new().on("conversations.replies", &[THREAD, THREAD_AND_MY_ANSWER]));
+        worker.on_change(live_post("D2", Some("1.0"), "2.0", "U2", "reply"));
+        worker.apply_pending();
+        worker.on_change(live_post("D2", Some("1.0"), "3.0", "U1", "done"));
+        worker.apply_pending();
+        assert_eq!(fresh_replies(&events(&rx)), [vec!["reply"], vec!["done"]]);
+    }
+
+    #[test]
+    fn names_are_known_before_the_messages_arrive() {
+        let (mut worker, rx) = signed_in(
+            Router::new()
+                .on("conversations.history", &[ONE_TWO])
+                .on("users.info", &[BOB]),
+        );
+        worker.known_users.remove("U2");
+        worker.on_change(live_post("D2", None, "2.0", "U2", "two"));
+        worker.apply_pending();
+        let got = events(&rx);
+        let users = got.iter().position(|e| matches!(e, Event::Users(_)));
+        let new = got.iter().position(|e| matches!(e, Event::New { .. }));
+        assert!(users < new, "names first: {got:?}");
+    }
+
+    #[test]
+    fn a_message_in_a_conversation_not_listed_yet_waits_for_the_relist() {
+        let (mut worker, rx) = signed_in(
+            Router::new()
+                .on("users.conversations", &["!500", WITH_D9])
+                .on("conversations.history", &[ONE_TWO]),
+        );
+        worker.on_change(live_post("D9", None, "2.0", "U2", "two"));
+        worker.apply_pending();
+        assert!(worker.pending.any());
+        worker.apply_pending();
+        assert_eq!(new_texts(&events(&rx)), Some(vec!["two".to_string()]));
+    }
+
+    const ONE_AND_MY_ANSWER: &str = r#"{"ok":true,"messages":[
+        {"ts":"2.0","user":"U1","text":"done"},{"ts":"1.0","user":"U2","text":"one"}]}"#;
+    const THREAD_AND_MY_ANSWER: &str = r#"{"ok":true,"messages":[
+        {"ts":"1.0","user":"U1","text":"parent","thread_ts":"1.0","reply_count":2},
+        {"ts":"2.0","user":"U2","text":"reply","thread_ts":"1.0"},
+        {"ts":"3.0","user":"U1","text":"done","thread_ts":"1.0"}]}"#;
+    const WITH_D9: &str = r#"{"ok":true,"channels":[{"id":"D9","is_im":true,"user":"U2"}]}"#;
 
     #[test]
     fn a_failed_fetch_elsewhere_is_tried_again() {

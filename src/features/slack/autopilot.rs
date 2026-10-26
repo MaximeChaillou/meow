@@ -200,6 +200,19 @@ impl Slack {
         }
     }
 
+    /// `thread` of `channel` changed: what waits in it is triaged on the new one.
+    pub(super) fn autopilot_thread_changed(&mut self, channel: &str, thread: &[Message]) {
+        let Some(parent) = thread.first() else {
+            return;
+        };
+        let waiting = self.autopilot.waiting.iter_mut().filter(|w| {
+            w.channel == channel && w.message.thread_ts.as_deref() == Some(parent.ts.as_str())
+        });
+        for waiting in waiting {
+            waiting.thread = thread.to_vec();
+        }
+    }
+
     /// The messages around `waiting`'s: its thread, else its conversation.
     fn context<'a>(&'a self, waiting: &'a Waiting) -> &'a [Message] {
         if waiting.thread.is_empty() {
