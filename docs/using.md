@@ -18,8 +18,11 @@ Everything the cat and its bubble respond to. For an overview, see the
   each conversation runs one request at a time, side by side with the others.
 - **New** (or `/new`, or ⌘N) starts a fresh conversation. Otherwise follow-ups
   continue the same Claude session (`--resume`).
-- **Right-click the cat** for the quick actions, Open Chat, New Conversation
-  and Quit. Quick actions are also in the chat's sidebar.
+- **Right-click the cat** for the quick actions, Open Chat, New Conversation,
+  Settings and Quit. Quick actions are also in the chat's sidebar.
+- **Settings** (at the bottom of the sidebar, in the cat's menu, or ⌘,) holds
+  every choice Meow keeps: the cat's look, drafting Slack replies in your
+  style, and Autopilot (on or off, when it starts, how it works).
 - **Clicking a quick action shows its last result** (and when it ran);
   **[ RUN ]** runs it again. An action that never ran runs on the first click
   (in the background from the cat's menu; the cat shows `!` when done). Ask
@@ -32,7 +35,7 @@ Everything the cat and its bubble respond to. For an overview, see the
   across to another one: only the outer edges of your screens are walls.
 - **Pet the cat** by stroking it: move the mouse back and forth over it (no
   click). It closes its eyes and little hearts float up.
-- **Dress the cat like yours**: right-click the cat › **Theme** picks its coat
+- **Dress the cat like yours**: **Settings › Appearance › Theme** picks its coat
   (Ginger, Willow, Alfie, or Dédé, who is a pig). **Add from Cat Photo…** asks for a photo of your
   cat; Claude (Haiku, allowed only to read a shrunk copy of the photo) picks
   the color of its fur, stripes, blaze, muzzle, legs, tail and each eye, and
@@ -40,7 +43,8 @@ Everything the cat and its bubble respond to. For an overview, see the
   cat sits with a `…` bubble meanwhile, then wears it. Your themes are listed
   under the built-in ones; a new photo with the same name replaces the old
   theme, and **Remove** deletes the one being worn. They are saved in
-  `~/Library/Application Support/Meow/settings.json`.
+  `~/Library/Application Support/Meow/settings.json`. The bubble's size and
+  the style (Pixel Art or Classic, which relaunches Meow) are there too.
 - **Now and then the cat coughs up a hairball** (or on demand: **Hairball** in
   its menu). It stays on the floor until you clean it: scrub it with the mouse
   button down, or click it a few times, until it sparkles and is gone.

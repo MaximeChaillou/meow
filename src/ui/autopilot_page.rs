@@ -1,10 +1,11 @@
 //! The Autopilot page: work Meow started by itself from Slack messages, newest
 //! first. Each card says who asked what, how the work went, and lists the
 //! actions that wait for the user (a push, a reply…) with Approve and Reject.
-//! A running job shows its last steps. Feedback typed at the bottom is kept
-//! and followed by every later job, or, after "Give feedback" on a job that
-//! ran, sent to that job, which works again following it. Below the jobs,
-//! the messages the triage last left alone say why.
+//! A running job shows its last steps. After "Give feedback" on a job that
+//! ran, what is typed at the bottom goes to that job, which works again
+//! following it. Below the jobs, the messages the triage last left alone say
+//! why. Turning Autopilot on, and telling it when to start and how to work,
+//! is done in Settings.
 
 use std::cell::RefCell;
 
@@ -36,15 +37,14 @@ const DELETE_WIDTH: f64 = 22.0;
 const BUTTON_WIDTH: f64 = 82.0;
 const BUTTON_GAP: f64 = 6.0;
 const FOLDER_WIDTH: f64 = 110.0;
-const TOGGLE_WIDTH: f64 = 110.0;
-const SAVE_WIDTH: f64 = 76.0;
+const SETTINGS_WIDTH: f64 = 110.0;
+const SEND_WIDTH: f64 = 76.0;
 const REPLY_WIDTH: f64 = 130.0;
 const INDENT: f64 = 6.0;
 const ACTION_INSET: f64 = 14.0;
 const WAITING_BORDER: f64 = 2.0;
-const FEEDBACK_HINT: &str = "Feedback for Autopilot, e.g. \"open the PR, don't message on Slack\"";
-const SAVE_TIP: &str = "Every job from now on follows this feedback";
-const SEND_TIP: &str = "The job works again, following this; Esc gives feedback for every job";
+const FEEDBACK_HINT: &str = "\"Give feedback\" on a job that ran to tell it what to do instead";
+const SEND_TIP: &str = "The job works again, following this; Esc cancels";
 /// Longest a held call's details are shown.
 const MAX_DETAIL_CHARS: usize = 700;
 /// Held actions are named `job row * TAG_STRIDE + action index`.
@@ -56,8 +56,8 @@ pub const PAGE_ID: &str = "autopilot";
 /// What the Autopilot page's controls ask for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AutopilotAction {
-    /// Turn Autopilot on or off.
-    Toggle,
+    /// Open Settings, where Autopilot is turned on and told what to do.
+    OpenSettings,
     /// Approve or reject a held action: job row × `TAG_STRIDE` + action index.
     Approve(usize),
     Reject(usize),
@@ -65,10 +65,8 @@ pub enum AutopilotAction {
     Dismiss(usize),
     /// Show the worktree of the job in this row.
     OpenFolder(usize),
-    /// Keep the feedback typed at the bottom.
+    /// Send the feedback typed at the bottom to the job replied to.
     Feedback,
-    /// Forget the feedback at this index.
-    RemoveFeedback(usize),
     /// Give feedback to the job in this row, or stop to.
     Reply(usize),
 }
@@ -78,7 +76,7 @@ pub struct AutopilotPage {
     scroll: Retained<NSScrollView>,
     list: Retained<FlippedView>,
     input: Retained<widgets::GrowingField>,
-    save: Retained<NSButton>,
+    send: Retained<NSButton>,
     /// The targets of the list's controls, all drawn again with it.
     actions: ActionSink<AutopilotAction>,
     /// The targets of the feedback field and its button, kept for them.
@@ -106,32 +104,32 @@ impl AutopilotPage {
         let fixed = ActionSink::new(mtm, on_action);
 
         let input = widgets::text_field(mtm, FEEDBACK_HINT);
-        let save_target = fixed.target(AutopilotAction::Feedback);
+        let send_target = fixed.target(AutopilotAction::Feedback);
         // SAFETY: the page keeps the target, and the controller lives as long
         // as the app, so the weak target and delegate stay valid.
         unsafe {
-            input.setTarget(Some(&save_target));
+            input.setTarget(Some(&send_target));
             input.setAction(Some(Target::selector()));
             input.setDelegate(Some(ProtocolObject::from_ref(&**controller)));
         }
-        // Saved on Return only, not when the field merely loses focus.
+        // Sent on Return only, not when the field merely loses focus.
         if let Some(cell) = input.cell() {
             cell.setSendsActionOnEndEditing(false);
         }
-        let save = widgets::text_button(
+        let send = widgets::text_button(
             mtm,
-            "Save",
+            "Send",
             widgets::ButtonStyle::Accent,
-            &save_target,
+            &send_target,
             Target::selector(),
         );
-        save.setToolTip(Some(&NSString::from_str(SAVE_TIP)));
+        send.setToolTip(Some(&NSString::from_str(SEND_TIP)));
         let bottom = widgets::composer(
             mtm,
             &view,
             &input,
             &[],
-            &[(&save, SAVE_WIDTH, widgets::ButtonStyle::Accent)],
+            &[(&send, SEND_WIDTH, widgets::ButtonStyle::Accent)],
         ) + 0.5 * MARGIN;
 
         let scroll = NSScrollView::initWithFrame(
@@ -159,7 +157,7 @@ impl AutopilotPage {
             scroll,
             list,
             input,
-            save,
+            send,
             actions: fixed.sibling(),
             _fixed: fixed,
             shown_ids: RefCell::new(Vec::new()),
@@ -192,16 +190,9 @@ impl AutopilotPage {
         }
     }
 
-    /// Draws the switch, the feedback kept, the jobs, then the messages left
-    /// alone; the feedback field speaks to `replying`, else to every job.
-    pub fn render(
-        &self,
-        jobs: &Jobs,
-        enabled: bool,
-        feedback: &[String],
-        replying: Option<&Job>,
-        now: u64,
-    ) {
+    /// Draws whether Autopilot is on, the jobs, then the messages left
+    /// alone; the feedback field speaks to `replying`, and is off without one.
+    pub fn render(&self, jobs: &Jobs, enabled: bool, replying: Option<&Job>, now: u64) {
         self.show_target(replying);
         let width = self.scroll.contentSize().width;
         for row in self.list.subviews().iter() {
@@ -209,7 +200,6 @@ impl AutopilotPage {
         }
         self.actions.clear();
         let mut y = self.add_switch(enabled, width);
-        y = self.add_feedback(feedback, width, y);
         let mut ids = Vec::new();
         for job in jobs.all() {
             let replied = replying.is_some_and(|r| r.id == job.id);
@@ -222,37 +212,34 @@ impl AutopilotPage {
         self.shown_ids.replace(ids);
     }
 
-    /// The feedback field's hint and button, for `replying` or for every job.
+    /// The feedback field's hint for `replying`; without it, the field is off.
     fn show_target(&self, replying: Option<&Job>) {
-        let (hint, label, tip) = match replying {
-            Some(job) => (
-                format!(
-                    "What should \"{}\" do instead? (Esc: for every job)",
-                    clip(&job.title, 60)
-                ),
-                "Send",
-                SEND_TIP,
+        let hint = match replying {
+            Some(job) => format!(
+                "What should \"{}\" do instead? (Esc: cancel)",
+                clip(&job.title, 60)
             ),
-            None => (FEEDBACK_HINT.to_string(), "Save", SAVE_TIP),
+            None => FEEDBACK_HINT.to_string(),
         };
         widgets::set_placeholder(&self.input, &hint);
-        widgets::set_text_button_label(&self.save, label, widgets::ButtonStyle::Accent);
-        self.save.setToolTip(Some(&NSString::from_str(tip)));
+        self.input.setEnabled(replying.is_some());
+        self.send.setEnabled(replying.is_some());
     }
 
-    /// What Autopilot does, and the button turning it on or off. Returns the y below.
+    /// What Autopilot does, and a link to Settings, where it is turned on
+    /// or off. Returns the y below.
     fn add_switch(&self, enabled: bool, width: f64) -> f64 {
         let hint = if enabled {
             "On: when a Slack message asks you for something, Claude prepares it here. \
              Nothing that can't be undone (a push, a message sent, an issue changed) \
-             happens until you approve it."
+             happens until you approve it. Tell it when to start and how to work in Settings."
         } else {
-            "Off. Turned on, Claude prepares what Slack messages ask you for (fixing a \
-             PR's conflicts, drafting a reply…), and waits for your approval before \
-             anything that can't be undone."
+            "Off. Turned on in Settings, Claude prepares what Slack messages ask you for \
+             (fixing a PR's conflicts, drafting a reply…), and waits for your approval \
+             before anything that can't be undone."
         };
         let style = Attributes::plain(theme::muted(), theme::font(theme::SMALL_SIZE));
-        let text_width = width - TOGGLE_WIDTH - 3.0 * INDENT;
+        let text_width = width - SETTINGS_WIDTH - 3.0 * INDENT;
         let height = self
             .add_wrapped(
                 &rich_text::attributed(hint, &style),
@@ -261,71 +248,23 @@ impl AutopilotPage {
                 text_width,
             )
             .max(ROW_HEIGHT);
-        let (label, style) = if enabled {
-            ("Turn off", widgets::ButtonStyle::Quiet)
-        } else {
-            ("Turn on", widgets::ButtonStyle::Go)
-        };
-        let target = self.actions.target(AutopilotAction::Toggle);
-        let toggle = widgets::text_button(self.mtm, label, style, &target, Target::selector());
-        toggle.setFrame(rect(
-            width - INDENT - TOGGLE_WIDTH,
+        let target = self.actions.target(AutopilotAction::OpenSettings);
+        let settings = widgets::text_button(
+            self.mtm,
+            "Settings",
+            widgets::ButtonStyle::Quiet,
+            &target,
+            Target::selector(),
+        );
+        settings.setFrame(rect(
+            width - INDENT - SETTINGS_WIDTH,
             0.0,
-            TOGGLE_WIDTH,
+            SETTINGS_WIDTH,
             ROW_HEIGHT,
         ));
-        toggle.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
-        self.list.addSubview(&toggle);
+        settings.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+        self.list.addSubview(&settings);
         height + 2.0 * CARD_GAP
-    }
-
-    /// The feedback every job follows, each line with × to forget it.
-    /// Returns the y below.
-    fn add_feedback(&self, feedback: &[String], width: f64, y: f64) -> f64 {
-        if feedback.is_empty() {
-            return y;
-        }
-        let heading = Attributes {
-            heavy: true,
-            ..Attributes::plain(theme::muted(), theme::font(theme::SMALL_SIZE))
-        };
-        let mut top =
-            y + self.add_wrapped(
-                &rich_text::attributed("Your feedback, followed by every job", &heading),
-                INDENT,
-                y,
-                width - 2.0 * INDENT,
-            ) + LINE_GAP;
-        let body = Attributes::plain(theme::ink(), theme::font(theme::SMALL_SIZE));
-        let text_width = width - 3.0 * INDENT - DELETE_WIDTH;
-        for (index, line) in feedback.iter().enumerate() {
-            let height = self
-                .add_wrapped(
-                    &rich_text::attributed(&format!("• {line}"), &body),
-                    INDENT,
-                    top,
-                    text_width,
-                )
-                .max(ROW_HEIGHT);
-            let remove = widgets::text_button(
-                self.mtm,
-                "×",
-                widgets::ButtonStyle::Link,
-                &self.actions.target(AutopilotAction::RemoveFeedback(index)),
-                Target::selector(),
-            );
-            remove.setToolTip(Some(&NSString::from_str("Forget this feedback")));
-            remove.setFrame(rect(
-                width - INDENT - DELETE_WIDTH,
-                top,
-                DELETE_WIDTH,
-                ROW_HEIGHT,
-            ));
-            remove.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
-            self.list.addSubview(&remove);
-            top += height + LINE_GAP;
-        }
-        top + 2.0 * CARD_GAP
     }
 
     /// The messages the triage last made no job of, each with why. Returns the y below.
@@ -492,7 +431,7 @@ impl AutopilotPage {
 
         if job.takes_feedback() {
             let (label, tip) = if replied {
-                ("Cancel feedback", "Feedback goes to every job again")
+                ("Cancel feedback", "Leave this job as it is")
             } else {
                 (
                     "Give feedback",

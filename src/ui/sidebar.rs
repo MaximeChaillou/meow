@@ -1,5 +1,6 @@
 //! Left column of the bubble: title, pages (Chat, Tasks, Activity and the
-//! features' pages, in their order) and the quick actions.
+//! features' pages, in their order), the quick actions, and Settings at the
+//! bottom.
 
 use std::cell::Cell;
 
@@ -38,7 +39,6 @@ const BULLET_SIZE: f64 = 11.0;
 const ICON_HEIGHT: f64 = 26.0;
 const ICON_GAP: f64 = 8.0;
 const BADGE_WIDTH: f64 = 34.0;
-const NEW_HEIGHT: f64 = 32.0;
 /// Bullet colors of the quick actions, in turn.
 const BULLETS: [fn() -> Retained<NSColor>; 4] =
     [theme::highlight, theme::link, theme::live, theme::accent];
@@ -51,6 +51,8 @@ pub enum Page {
     Plan,
     /// What happened in the background.
     Activity,
+    /// Every choice the user keeps, from all the features.
+    Settings,
     /// A feature's page, by the id in its `PageSpec`.
     Feature(&'static str),
 }
@@ -61,6 +63,7 @@ pub enum Selection {
     Chat,
     Tasks,
     Activity,
+    Settings,
     Feature(&'static str),
     Action(usize),
 }
@@ -105,6 +108,9 @@ pub struct Sidebar {
     chat: Retained<NSButton>,
     tasks: Retained<NSButton>,
     activity: Retained<NSButton>,
+    settings: Retained<NSButton>,
+    /// The Settings button's target, which the button only holds weakly.
+    _settings_action: Retained<Action>,
     pages: Vec<FeatureRow>,
     actions: Vec<(Retained<NSButton>, String)>,
     selected: Cell<Selection>,
@@ -218,23 +224,19 @@ impl Sidebar {
             y += ACTION_HEIGHT;
         }
 
-        // Starts a fresh conversation, like ⌘N; kept at the bottom.
-        let new = widgets::text_button(
+        // Kept at the bottom; ⌘N and the chat's New start a fresh conversation.
+        let settings_action = Action::new(mtm, || events::push(UiEvent::ShowPage(Page::Settings)));
+        let settings = borderless_button(
             mtm,
-            "+ New   ⌘N",
-            widgets::ButtonStyle::Quiet,
-            target,
-            sel!(newConversation:),
+            &settings_action,
+            Action::selector(),
+            area.size.height - PADDING - NAV_HEIGHT,
+            NAV_HEIGHT,
         );
-        new.setFrame(rect(
-            PADDING,
-            area.size.height - PADDING - NEW_HEIGHT,
-            WIDTH - 3.0 * PADDING,
-            NEW_HEIGHT,
-        ));
         // The column is flipped: a flexible top margin keeps it at the bottom.
-        new.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
-        view.addSubview(&new);
+        settings.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
+        settings.setToolTip(Some(&NSString::from_str("Settings (⌘,)")));
+        view.addSubview(&settings);
 
         let sidebar = Self {
             view,
@@ -245,6 +247,8 @@ impl Sidebar {
             chat,
             tasks,
             activity,
+            settings,
+            _settings_action: settings_action,
             pages,
             actions: action_buttons,
             selected: Cell::new(Selection::Chat),
@@ -318,6 +322,7 @@ impl Sidebar {
             (&self.chat, "Chat", Selection::Chat),
             (&self.tasks, "Tasks", Selection::Tasks),
             (&self.activity, "Activity", Selection::Activity),
+            (&self.settings, "Settings", Selection::Settings),
         ];
         let features = self.pages.iter().map(|row| {
             set_badge(&row.badge, row.count.get());

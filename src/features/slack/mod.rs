@@ -1,8 +1,9 @@
 //! Slack, and what Meow does with it: the live conversations and their page
 //! (`conversations`), Claude's private panel (`assist`), drafting in the
 //! user's own style (`voice`), custom emoji and attached images (`emoji`,
-//! `downloads`), calendar events from a conversation (`events`), and the work
-//! Autopilot prepares from Slack messages, with its own page (`autopilot`).
+//! `downloads`), calendar events from a conversation (`events`), the work
+//! Autopilot prepares from Slack messages, with its own page (`autopilot`),
+//! and their sections of the Settings page (`settings`).
 //!
 //! They share the Slack state, so they live in one feature; each part keeps
 //! its own file. Coding agents, the calendar tools and Activity are the
@@ -14,6 +15,7 @@ mod conversations;
 mod downloads;
 mod emoji;
 mod events;
+mod settings;
 mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -29,6 +31,7 @@ use crate::app::feature::{Feature, Host};
 use crate::app::mailbox::Mailbox;
 use crate::ui::autopilot_page::{self, AutopilotAction, AutopilotPage};
 use crate::ui::chat_window::{PageKit, PageView};
+use crate::ui::settings_page::SettingsSection;
 use crate::ui::sidebar::{Page, PageSpec};
 use crate::ui::slack_page::{self, SlackAction, SlackPage};
 use crate::ui::theme;
@@ -37,6 +40,7 @@ use assist::SlackAssist;
 use autopilot::AutopilotState;
 use conversations::SlackState;
 use emoji::EmojiState;
+use settings::Setting;
 use voice::VoiceState;
 
 /// The Slack feature's settings.
@@ -47,13 +51,19 @@ pub(crate) struct SlackSettings {
     pub write_as_me: bool,
     /// Slack messages asking the user for something start autopilot work.
     pub autopilot: bool,
-    /// What the user told Autopilot about its work, followed by every job.
+    /// Which messages Autopilot prepares work for, in the user's words.
+    pub autopilot_when: String,
+    /// How Autopilot does the work, in the user's words.
+    pub autopilot_how: String,
+    /// Feedback every job followed before there was "How to work": moved
+    /// into it at launch, then saved empty.
     pub autopilot_feedback: Vec<String>,
 }
 
 enum Msg {
     Slack(SlackAction),
     Autopilot(AutopilotAction),
+    Setting(Setting),
 }
 
 pub(crate) struct Slack {
@@ -154,14 +164,23 @@ impl Slack {
     }
 }
 
-impl Feature for Slack {
-    fn poll(&mut self, host: &mut dyn Host) {
+impl Slack {
+    /// What the feature's controls sent since the last poll.
+    fn handle_messages(&mut self, host: &mut dyn Host) {
+        self.fold_autopilot_feedback(host);
         for message in self.inbox.drain() {
             match message {
                 Msg::Slack(action) => self.slack_action(action, host),
                 Msg::Autopilot(action) => self.autopilot_action(action, host),
+                Msg::Setting(setting) => self.change_setting(setting, host),
             }
         }
+    }
+}
+
+impl Feature for Slack {
+    fn poll(&mut self, host: &mut dyn Host) {
+        self.handle_messages(host);
         self.poll_slack(host);
         self.poll_emoji(host);
         self.animate_slack(host);
@@ -179,6 +198,10 @@ impl Feature for Slack {
 
     fn startup_error(&self) -> Option<String> {
         (!self.load_errors.is_empty()).then(|| self.load_errors.join("\n"))
+    }
+
+    fn settings(&self) -> Vec<SettingsSection> {
+        self.settings_sections()
     }
 
     fn pages(&self) -> Vec<PageSpec> {

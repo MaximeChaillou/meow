@@ -1,5 +1,5 @@
 //! The main floating window, drawn as the cat's speech bubble: a sidebar on
-//! the left, and the chat, task or plan page.
+//! the left, and the chat, task, plan, Activity, Settings or a feature's page.
 
 use std::cell::{Cell, RefCell};
 
@@ -23,6 +23,7 @@ use super::controller::Controller;
 use super::plan_page::PlanPage;
 use super::rich_text::{self, Attributes};
 use super::screens;
+use super::settings_page::SettingsPage;
 use super::sidebar::{self, Page, PageSpec, Selection, Sidebar};
 use super::task_page::TaskPage;
 use super::theme;
@@ -64,6 +65,7 @@ pub struct ChatWindow {
     tasks: TaskPage,
     plan: PlanPage,
     activity: ActivityPage,
+    settings: SettingsPage,
     /// The features' pages, as listed in the sidebar.
     feature_pages: Vec<PageSpec>,
     /// Their views once built, by page id (see `add_page`).
@@ -121,10 +123,12 @@ impl ChatWindow {
         let tasks = TaskPage::new(mtm, controller, page_frame);
         let plan = PlanPage::new(mtm, controller, page_frame);
         let activity = ActivityPage::new(mtm, controller, page_frame);
+        let settings = SettingsPage::new(mtm, controller, page_frame);
         bubble.addSubview(&chat.view);
         bubble.addSubview(&tasks.view);
         bubble.addSubview(&plan.view);
         bubble.addSubview(&activity.view);
+        bubble.addSubview(&settings.view);
         bubble.addSubview(&close_button(mtm, controller, inner));
         let header = NSTextField::labelWithString(&NSString::from_str(""), mtm);
         header.setFrame(rect(
@@ -175,6 +179,7 @@ impl ChatWindow {
             tasks,
             plan,
             activity,
+            settings,
             feature_pages: pages.to_vec(),
             feature_views: RefCell::new(Vec::new()),
             page_frame,
@@ -206,6 +211,10 @@ impl ChatWindow {
 
     pub fn activity(&self) -> &ActivityPage {
         &self.activity
+    }
+
+    pub fn settings(&self) -> &SettingsPage {
+        &self.settings
     }
 
     /// Where a page's view goes in the bubble, for `add_page`.
@@ -259,6 +268,7 @@ impl ChatWindow {
         self.tasks.view.setHidden(page != Page::Tasks);
         self.plan.view.setHidden(page != Page::Plan);
         self.activity.view.setHidden(page != Page::Activity);
+        self.settings.view.setHidden(page != Page::Settings);
         for (id, feature) in self.feature_views.borrow().iter() {
             feature.view.setHidden(page != Page::Feature(id));
         }
@@ -278,6 +288,7 @@ impl ChatWindow {
             ),
             Page::Tasks => (self.tasks_title.borrow().clone(), Selection::Tasks, false),
             Page::Activity => ("Activity".to_string(), Selection::Activity, false),
+            Page::Settings => ("Settings".to_string(), Selection::Settings, false),
             Page::Feature(id) => {
                 let spec = self.feature_pages.iter().find(|spec| spec.id == id);
                 let title = spec.map_or(id, |spec| spec.title).to_string();
@@ -357,8 +368,8 @@ impl ChatWindow {
             Page::Chat => self.chat.focus(&self.panel),
             Page::Tasks => self.tasks.focus(&self.panel),
             Page::Plan => self.plan.focus(&self.panel),
-            // Nothing to type into: the bubble itself keeps the focus.
-            Page::Activity => {}
+            // Nothing to type into first: the bubble itself keeps the focus.
+            Page::Activity | Page::Settings => {}
             Page::Feature(id) => self.focus_feature(id),
         }
     }

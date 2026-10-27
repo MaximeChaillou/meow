@@ -14,6 +14,7 @@ use serde_json::Value;
 use crate::claude::STRONG_MODEL;
 use crate::context;
 use crate::guard::Call;
+use crate::slack::model::ChannelKind;
 use crate::tasks::take_fence;
 
 pub const PLAN_FENCE: &str = "meow-autopilot";
@@ -22,7 +23,7 @@ pub const KEEP_SECS: u64 = 7 * 24 * 60 * 60;
 const MAX_TEXT_CHARS: usize = 2000;
 const MAX_SUMMARY_CHARS: usize = 4000;
 const MAX_JOBS: usize = 50;
-/// Longest a piece of feedback is kept.
+/// Longest a job's feedback is kept.
 const MAX_FEEDBACK_CHARS: usize = 500;
 /// The work's model unless it is hard: quick, and enough to look things up
 /// and draft a reply.
@@ -520,37 +521,78 @@ pub fn user_rules() -> Option<String> {
     Some(text.trim().to_string()).filter(|t| !t.is_empty())
 }
 
-/// `feedback` with `text` added at the end, on one line: unchanged when
-/// `text` is blank or already there.
-pub fn add_feedback(feedback: &[String], text: &str) -> Vec<String> {
-    let line = one_line(text, MAX_FEEDBACK_CHARS);
-    let mut all = feedback.to_vec();
-    if !line.is_empty() && !feedback.contains(&line) {
-        all.push(line);
+/// What the user told Autopilot, on top of its own instructions.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Instructions<'a> {
+    /// `~/.config/meow/autopilot.md` (see [`user_rules`]), for the triage and the work.
+    pub rules: Option<&'a str>,
+    /// Which messages to prepare work for, for the triage.
+    pub when: Option<&'a str>,
+    /// How to do the work, for the work.
+    pub how: Option<&'a str>,
+}
+
+/// `how`, with the feedback saved before there was "How to work" added at
+/// its end, one `- ` line each.
+pub fn fold_feedback(how: &str, feedback: &[String]) -> String {
+    let lines = feedback.iter().map(|f| format!("- {f}"));
+    let how = how.trim_end();
+    std::iter::once(how.to_string())
+        .filter(|h| !h.is_empty())
+        .chain(lines)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Where a message was written, for the triage: "in a direct message
+/// (private…)", "in a thread of a channel, mentioning them"…
+pub fn place(kind: Option<ChannelKind>, in_thread: bool) -> &'static str {
+    match (kind, in_thread) {
+        (Some(ChannelKind::Im), false) => {
+            "in a direct message (private: only the two of them read it)"
+        }
+        (Some(ChannelKind::Im), true) => {
+            "in a direct message (private: only the two of them read it), in a thread"
+        }
+        (Some(ChannelKind::Mpim), false) => {
+            "in a group direct message (private: a few people read it)"
+        }
+        (Some(ChannelKind::Mpim), true) => {
+            "in a group direct message (private: a few people read it), in a thread"
+        }
+        (Some(ChannelKind::Channel), false) => "in a channel, mentioning them",
+        (Some(ChannelKind::Channel), true) => "in a thread of a channel, mentioning them",
+        (None, _) => "on Slack",
     }
-    all
 }
 
-/// What the triage and the work follow besides their own instructions: the
-/// user's rules file, then each piece of feedback given on the Autopilot page.
-pub fn rules(own: Option<&str>, feedback: &[String]) -> Option<String> {
-    let lines: Vec<String> = own
-        .map(str::to_string)
-        .into_iter()
-        .chain(feedback.iter().map(|f| format!("- {f}")))
-        .collect();
-    (!lines.is_empty()).then(|| lines.join("\n"))
-}
-
-/// The triage request: is there work in what `from` just wrote to `me`?
-/// `conversation` is the recent messages, oldest first, as `Name: text`.
-pub fn triage_prompt(me: &str, from: &str, conversation: &str, rules: Option<&str>) -> String {
-    let rules = rules
+/// The triage request: is there work in what `from` just wrote to `me`,
+/// `place` (see [`place`])? `conversation` is the recent messages, oldest
+/// first, as `Name: text`. It follows the user's rules and `when`.
+pub fn triage_prompt(
+    me: &str,
+    from: &str,
+    place: &str,
+    conversation: &str,
+    instructions: &Instructions,
+) -> String {
+    let rules = instructions
+        .rules
         .map(|r| format!("\n\n{me}'s own rules, which win over the ones above:\n{r}"))
         .unwrap_or_default();
+    let when = instructions
+        .when
+        .map(|w| {
+            format!("\n\nWhen {me} wants work prepared, which wins over the rules above:\n{w}")
+        })
+        .unwrap_or_default();
+    let place = match place {
+        "" => String::new(),
+        place => format!(" {place}"),
+    };
     format!(
-        "You triage {me}'s Slack messages while {me} is busy. {from} just wrote to {me}. Here \
-is the conversation, oldest first; the last messages are the new ones:\n\n\
+        "You triage {me}'s Slack messages while {me} is busy. {from} just wrote to {me}{place}. \
+Here is the conversation, oldest first; the last messages are the new ones:\n\n\
 <conversation>\n{conversation}\n</conversation>\n\n\
 Decide whether the new messages ask {me} to do something an assistant could prepare ahead: a \
 coding agent with {me}'s tools (git clones of the repositories, the GitHub CLI, read access to \
@@ -558,7 +600,7 @@ Slack, Linear, Gmail, Notion, the calendar) works on it, and every action that c
 (sending a message, pushing, commenting, changing an issue) waits for {me}'s approval. Fixing a \
 pull request's conflicts, a bug, a review comment, looking up an answer and drafting the reply: \
 yes. Greetings, thanks, news with no request, opinions or decisions only {me} can give, \
-something {me} already answered: no.{rules}\n\n\
+something {me} already answered: no.{rules}{when}\n\n\
 If there is no work, reply with the single word `none`. Otherwise reply only with a fenced code \
 block with the info string `{PLAN_FENCE}` holding one JSON object: {{\"title\": 3 to 8 words, \
 \"prompt\": the agent's prompt, self-contained (it sees nothing else): who asked what, the exact \
@@ -600,8 +642,8 @@ pub fn parse_plan(answer: &str) -> Option<Plan> {
 }
 
 /// What the run starts with: the plan, where it works, how irreversible
-/// actions are handled, and the user's `rules` (see [`rules`]).
-pub fn work_prompt(job: &Job, me: &str, rules: Option<&str>) -> String {
+/// actions are handled, then the user's rules and how they want it done.
+pub fn work_prompt(job: &Job, me: &str, instructions: &Instructions) -> String {
     let place = match &job.folder {
         Some(folder) => {
             let pr = folder
@@ -633,11 +675,16 @@ it into this folder."
             None => String::new(),
         },
     };
-    let rules = rules
-        .map(|r| {
+    let rules = instructions
+        .rules
+        .map(|r| format!("\n\n{me}'s rules, which win over the instructions above:\n{r}"))
+        .unwrap_or_default();
+    let how = instructions
+        .how
+        .map(|h| {
             format!(
-                "\n\n{me}'s rules and feedback on earlier work, which win over the instructions \
-above:\n{r}"
+                "\n\nThis is how {me} wants the work done, which wins over the instructions \
+above, except that what cannot be undone still waits for {me}'s approval:\n{h}"
             )
         })
         .unwrap_or_default();
@@ -661,7 +708,7 @@ the call exactly as you would if it were allowed, with its final content (for a 
 message itself, in {me}'s voice and the conversation's language), and it will wait for {me} \
 to approve it. Do not try to reach the same result another way. When a reply to {from} would \
 help, prepare it that way too, with `{send}` ({reply_to}): Slack messages go through {me}'s own \
-Slack in Meow, never through another Slack tool.{rules}\n\n\
+Slack in Meow, never through another Slack tool.{rules}{how}\n\n\
 End with a short summary for {me}, in the language of the request: what you did, and what is \
 waiting for approval.",
         prompt = job.plan_prompt,
@@ -836,6 +883,7 @@ fn one_line(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slack::model::ChannelKind;
     use serde_json::json;
 
     fn plan() -> Plan {
@@ -954,7 +1002,8 @@ mod tests {
             "opus",
             "saved before jobs said whether they were hard"
         );
-        assert!(triage_prompt("Axel", "Julien", "Julien: hi", None).contains("\"hard\""));
+        let prompt = triage_prompt("Axel", "Julien", "", "Julien: hi", &Instructions::default());
+        assert!(prompt.contains("\"hard\""));
     }
 
     #[test]
@@ -1071,7 +1120,7 @@ mod tests {
             base: Some("main".into()),
             pr_url: Some("https://github.com/o/r/pull/12".into()),
         });
-        let prompt = work_prompt(job, "Cyril", None);
+        let prompt = work_prompt(job, "Cyril", &Instructions::default());
         assert!(prompt.starts_with("Resolve the merge conflicts"));
         assert!(prompt.contains("`git push fork HEAD:feat/x`"), "{prompt}");
         assert!(prompt.contains("merges into `main`"));
@@ -1146,58 +1195,116 @@ mod tests {
         jobs.add(plan(), origin("1"), 0);
         let job = jobs.get_mut(1).unwrap();
         assert!(job.needs_folder());
-        assert!(!work_prompt(job, "Axel", None).contains("could not make a git worktree"));
+        let none = Instructions::default();
+        assert!(!work_prompt(job, "Axel", &none).contains("could not make a git worktree"));
 
         job.folder_error = Some("No clone of o/r found".into());
         assert!(!job.needs_folder());
-        let prompt = work_prompt(job, "Axel", None);
+        let prompt = work_prompt(job, "Axel", &none);
         assert!(prompt.contains("could not make a git worktree for this work (No clone of o/r"));
         assert!(prompt.contains("--repo owner/name"));
     }
 
     #[test]
-    fn feedback_is_kept_once_on_one_line() {
-        let feedback = add_feedback(&[], "  Open the PR,\n\ndon't   message on Slack. ");
-        assert_eq!(feedback, ["Open the PR, don't message on Slack."]);
-        assert_eq!(add_feedback(&feedback, "   \n"), feedback);
-        assert_eq!(
-            add_feedback(&feedback, "Open the PR, don't message on Slack."),
-            feedback
+    fn the_triage_says_where_it_was_written_and_follows_when_to_start() {
+        let when = "Only private messages about a coding task";
+        let instructions = Instructions {
+            rules: Some("Never for bots"),
+            when: Some(when),
+            how: Some("Open a draft PR"),
+        };
+        let place = place(Some(ChannelKind::Im), false);
+        let prompt = triage_prompt("Axel", "Julien", place, "Julien: fix #12?", &instructions);
+        assert!(
+            prompt.contains("Julien just wrote to Axel in a direct message (private"),
+            "{prompt}"
         );
-        let long = add_feedback(&[], &"a".repeat(MAX_FEEDBACK_CHARS + 10));
-        assert_eq!(long[0].chars().count(), MAX_FEEDBACK_CHARS + 1);
+        assert!(
+            prompt.contains(&format!(
+                "When Axel wants work prepared, which wins over the rules above:\n{when}"
+            )),
+            "{prompt}"
+        );
+        assert!(prompt.contains("Axel's own rules"), "{prompt}");
+        assert!(prompt.contains("Never for bots"), "{prompt}");
+        assert!(
+            !prompt.contains("Open a draft PR"),
+            "how to work is the work's"
+        );
+        let plain = triage_prompt(
+            "Axel",
+            "Julien",
+            place,
+            "Julien: hi",
+            &Instructions::default(),
+        );
+        assert!(
+            !plain.contains("which wins over the rules above"),
+            "{plain}"
+        );
+        assert!(!plain.contains("own rules"), "{plain}");
     }
 
     #[test]
-    fn rules_join_the_users_file_and_feedback() {
-        assert_eq!(rules(None, &[]), None);
+    fn places_say_who_can_read_the_message() {
+        assert!(place(Some(ChannelKind::Im), false).starts_with("in a direct message (private"));
+        assert!(place(Some(ChannelKind::Mpim), false).starts_with("in a group direct message"));
         assert_eq!(
-            rules(Some("Only for messages from Axel"), &[]).as_deref(),
-            Some("Only for messages from Axel")
+            place(Some(ChannelKind::Channel), true),
+            "in a thread of a channel, mentioning them"
         );
-        let feedback = ["Only the PR, no Slack message".to_string()];
-        assert_eq!(
-            rules(None, &feedback).as_deref(),
-            Some("- Only the PR, no Slack message")
-        );
-        assert_eq!(
-            rules(Some("Only for Axel"), &feedback).as_deref(),
-            Some("Only for Axel\n- Only the PR, no Slack message")
-        );
+        assert_eq!(place(None, false), "on Slack");
+        assert!(place(Some(ChannelKind::Im), true).ends_with(", in a thread"));
     }
 
     #[test]
-    fn the_work_prompt_follows_the_users_rules() {
+    fn the_work_prompt_follows_how_to_work_and_the_users_rules() {
         let mut jobs = Jobs::default();
         let id = jobs.add(plan(), origin("1"), 0).id;
         let job = jobs.get(id).unwrap();
-        assert!(!work_prompt(job, "Axel", None).contains("Axel's rules"));
-        let prompt = work_prompt(job, "Axel", Some("- Only the PR, no Slack message"));
+        let plain = work_prompt(job, "Axel", &Instructions::default());
+        assert!(!plain.contains("Axel's rules"), "{plain}");
+        assert!(!plain.contains("how Axel wants"), "{plain}");
+        let how = "For coding tasks, open a new task in Superset and a draft PR at the end";
+        let instructions = Instructions {
+            rules: Some("Answer in French"),
+            when: Some("Only private messages"),
+            how: Some(how),
+        };
+        let prompt = work_prompt(job, "Axel", &instructions);
+        assert!(prompt.contains("Axel's rules, which win over"), "{prompt}");
         assert!(
-            prompt.contains("Axel's rules and feedback on earlier work, which win over"),
+            prompt.contains(&format!(
+                "This is how Axel wants the work done, which wins over the instructions above, \
+                 except that what cannot be undone still waits for Axel's approval:\n{how}"
+            )),
             "{prompt}"
         );
-        assert!(prompt.contains("- Only the PR, no Slack message\n\nEnd with a short summary"));
+        assert!(
+            prompt.contains(&format!("{how}\n\nEnd with a short summary")),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains("Only private messages"),
+            "when to start is the triage's"
+        );
+    }
+
+    #[test]
+    fn feedback_saved_before_is_folded_into_how_to_work() {
+        assert_eq!(fold_feedback("Open a draft PR", &[]), "Open a draft PR");
+        let feedback = [
+            "Answer in French".to_string(),
+            "No Slack message".to_string(),
+        ];
+        assert_eq!(
+            fold_feedback("", &feedback),
+            "- Answer in French\n- No Slack message"
+        );
+        assert_eq!(
+            fold_feedback("Open a draft PR\n", &feedback),
+            "Open a draft PR\n- Answer in French\n- No Slack message"
+        );
     }
 
     /// Job `id` of `jobs`, finished with a push and a reply waiting.
@@ -1312,9 +1419,10 @@ mod tests {
         let mut jobs = Jobs::default();
         let id = jobs.add(plan(), origin("1"), 0).id;
         jobs.finish(id, Err("Claude Code wasn't found".into()), Vec::new(), 1);
-        assert!(!work_prompt(jobs.get(id).unwrap(), "Axel", None).contains("feedback on"));
+        let none = Instructions::default();
+        assert!(!work_prompt(jobs.get(id).unwrap(), "Axel", &none).contains("feedback on"));
         jobs.follow_up(id, "Look at the iOS build too");
-        let prompt = work_prompt(jobs.get(id).unwrap(), "Axel", None);
+        let prompt = work_prompt(jobs.get(id).unwrap(), "Axel", &none);
         assert!(
             prompt.contains("Axel's feedback on an earlier try of this work:\n- Look at the iOS"),
             "{prompt}"

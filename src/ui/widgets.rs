@@ -303,6 +303,20 @@ pub fn paint(view: &NSView, fill: Option<&NSColor>, border: Option<(&NSColor, f6
 /// A square input field: pixel font on a dark fill, inside a grey pixel border.
 pub fn text_field(mtm: MainThreadMarker, placeholder: &str) -> Retained<GrowingField> {
     let field = GrowingField::new(mtm);
+    dress_field(mtm, &field, placeholder);
+    field
+}
+
+/// A [`text_field`] that keeps the height it is given, for text kept on a
+/// page rather than sent: it shows as many lines as fit, then scrolls.
+pub fn text_area(mtm: MainThreadMarker, placeholder: &str) -> Retained<NSTextField> {
+    let field = NSTextField::new(mtm);
+    dress_field(mtm, &field, placeholder);
+    field
+}
+
+/// Gives `field` the padded, wrapping cell and the look of the input fields.
+fn dress_field(mtm: MainThreadMarker, field: &NSTextField, placeholder: &str) {
     let cell = PaddedCell::new(mtm);
     cell.setEditable(true);
     cell.setSelectable(true);
@@ -317,13 +331,12 @@ pub fn text_field(mtm: MainThreadMarker, placeholder: &str) -> Retained<GrowingF
     field.setBordered(false);
     field.setDrawsBackground(false);
     field.setFocusRingType(NSFocusRingType::None);
-    set_placeholder(&field, placeholder);
+    set_placeholder(field, placeholder);
     paint(
-        &field,
+        field,
         Some(&theme::field_background()),
         Some((&theme::field_border(), FIELD_BORDER)),
     );
-    field
 }
 
 /// Changes the muted hint a [`text_field`] shows while empty.

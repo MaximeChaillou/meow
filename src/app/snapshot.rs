@@ -13,17 +13,19 @@ use std::time::{Duration, Instant};
 use meow::transcript::Transcript;
 
 use crate::ui::events::UiEvent;
+use crate::ui::sidebar::Page;
 
 use super::App;
 
 /// The app's pages, in order; each is saved once it has settled.
-const STEPS: [&str; 6] = [
+const STEPS: [&str; 7] = [
     "chat",
     "chat-two-lines",
     "chat-long",
     "tasks",
     "tasks-reply",
     "plan",
+    "settings",
 ];
 /// Time for the app to settle before the first step (fonts, tasks).
 const START_DELAY: Duration = Duration::from_secs(4);
@@ -110,6 +112,7 @@ impl App {
                 }
             }
             "plan" => self.handle(UiEvent::QuickAction(0)),
+            "settings" => self.handle(UiEvent::ShowPage(Page::Settings)),
             // A step a feature adds.
             step => self.show_feature_snapshot(step),
         }

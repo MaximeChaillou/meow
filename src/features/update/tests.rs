@@ -45,7 +45,7 @@ fn menu_shows_the_version_then_check_for_updates() {
 fn check_from_the_menu_on_a_local_build_says_why_in_a_banner() {
     let mut update = local_build();
     let mut host = FakeHost::default();
-    click(&update.menu(), &["Check for Updates"]);
+    click(&update.menu(), "Check for Updates");
     assert!(
         host.banners.is_empty(),
         "handled on the next poll, not in the click"

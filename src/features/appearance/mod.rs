@@ -1,4 +1,4 @@
-//! How Meow looks, from the cat's menu › Theme: the coat the cat wears, the
+//! How Meow looks, from Settings › Appearance: the coat the cat wears, the
 //! size the chat bubble opens at and the style, kept across launches, and themes made
 //! from a photo of the user's cat: the photo is shrunk in the background,
 //! then a run that may only read that copy reports its colors.
@@ -21,8 +21,8 @@ use objc2::MainThreadMarker;
 
 use crate::app::feature::{Feature, Host};
 use crate::app::mailbox::{Mailbox, Sender};
-use crate::ui::menus::{MenuEntry, MenuSection};
 use crate::ui::photo_picker;
+use crate::ui::settings_page::{SettingEntry, SettingsSection};
 
 #[derive(Clone)]
 enum Msg {
@@ -86,13 +86,13 @@ impl Theme {
         }
     }
 
-    /// Wears and saves `appearance`, and shows it in the menu.
+    /// Wears and saves `appearance`, and shows it in Settings.
     fn apply(&mut self, appearance: Appearance, host: &mut dyn Host) {
         if appearance.coat != self.appearance.coat {
             host.wear(appearance.coat);
         }
         self.appearance = appearance;
-        host.menu_changed();
+        host.settings_changed();
         if let Err(error) = host.settings().set(&self.appearance) {
             eprintln!("meow: {error}");
             host.error_in(&ChatId::Main, &error);
@@ -143,7 +143,7 @@ impl Theme {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
-        host.menu_changed();
+        host.settings_changed();
     }
 
     /// Moves the theme from a photo along: from the shrunk copy to Claude,
@@ -166,7 +166,7 @@ impl Theme {
         match outcome {
             Ok(custom) => self.add_custom(custom, host),
             Err(error) => {
-                host.menu_changed();
+                host.settings_changed();
                 failed(host, &error);
             }
         }
@@ -175,7 +175,7 @@ impl Theme {
     fn look_at_photo(&mut self, preview: &Path, host: &mut dyn Host) {
         let Some(env) = host.claude() else {
             self.step = None;
-            host.menu_changed();
+            host.settings_changed();
             return failed(host, "Claude Code is not available.");
         };
         let prompt = cat_photo::prompt(preview, &self.photo_name);
@@ -184,7 +184,7 @@ impl Theme {
             Ok(run) => self.step = Some(Step::Looking(run)),
             Err(error) => {
                 self.step = None;
-                host.menu_changed();
+                host.settings_changed();
                 failed(host, &error);
             }
         }
@@ -192,61 +192,69 @@ impl Theme {
 
     fn add_custom(&mut self, custom: CustomCoat, host: &mut dyn Host) {
         let note = format!(
-            "New theme: {}. Switch themes from the cat's menu › Theme.",
+            "New theme: {}. Switch themes in Settings › Appearance.",
             custom.name
         );
         self.apply(self.appearance.with_custom(custom), host);
         host.info_in(&ChatId::Main, &note);
     }
 
-    /// The Theme submenu's items: one per theme, the worn one checked, the
-    /// built-in ones apart from the user's own, then adding one from a photo
-    /// and removing the worn one when it is the user's, then window sizes
-    /// and styles.
-    fn theme_entries(&self) -> Vec<MenuEntry> {
+    /// The Appearance section: the themes, the built-in ones then the
+    /// user's own, the worn one picked; adding one from a photo and removing
+    /// the worn one when it is the user's; then window sizes and styles.
+    fn appearance_entries(&self) -> Vec<SettingEntry> {
         let inbox = self.inbox.sender();
-        let built_in = Coat::ALL.len();
-        let mut entries = Vec::new();
-        for (index, (name, coat)) in self.appearance.coats().into_iter().enumerate() {
-            if index == built_in {
-                entries.push(MenuEntry::Separator);
-            }
-            let checked = coat == self.appearance.coat;
-            entries.push(action(&inbox, name, checked, Msg::Wear(coat)));
-        }
-        entries.push(MenuEntry::Separator);
+        let coats = self.appearance.coats();
+        let worn = coats
+            .iter()
+            .position(|(_, coat)| *coat == self.appearance.coat);
+        let mut entries = vec![choice(
+            &inbox,
+            "Theme",
+            coats.iter().map(|(name, _)| name.clone()).collect(),
+            worn,
+            move |index| coats.get(index).map(|(_, coat)| Msg::Wear(*coat)),
+        )];
         if self.step.is_some() {
-            entries.push(MenuEntry::Label("Looking at Your Cat…".to_string()));
+            entries.push(SettingEntry::Note("Looking at your cat…".to_string()));
         } else {
-            let title = "Add from Cat Photo…".to_string();
-            entries.push(action(&inbox, title, false, Msg::AddFromPhoto));
+            entries.push(button(
+                &inbox,
+                "Add from Cat Photo…".to_string(),
+                Msg::AddFromPhoto,
+            ));
         }
         if let Some(custom) = self.appearance.current_custom() {
             let title = format!("Remove \u{201c}{}\u{201d}", custom.name);
-            entries.push(action(&inbox, title, false, Msg::RemoveCustom));
+            entries.push(button(&inbox, title, Msg::RemoveCustom));
         }
-        entries.push(MenuEntry::Separator);
-        entries.push(MenuEntry::Label("Window Size".to_string()));
-        for size in WindowSize::ALL {
-            let checked = size == self.appearance.window_size;
-            entries.push(action(
-                &inbox,
-                size.name().to_string(),
-                checked,
-                Msg::Resize(size),
-            ));
-        }
-        entries.push(MenuEntry::Separator);
-        entries.push(MenuEntry::Label("Style (relaunches Meow)".to_string()));
-        for style in Style::ALL {
-            let checked = style == self.appearance.style;
-            entries.push(action(
-                &inbox,
-                style.name().to_string(),
-                checked,
-                Msg::Restyle(style),
-            ));
-        }
+        entries.push(choice(
+            &inbox,
+            "Window size",
+            WindowSize::ALL
+                .iter()
+                .map(|size| size.name().to_string())
+                .collect(),
+            WindowSize::ALL
+                .iter()
+                .position(|size| *size == self.appearance.window_size),
+            |index| WindowSize::ALL.get(index).copied().map(Msg::Resize),
+        ));
+        entries.push(choice(
+            &inbox,
+            "Style",
+            Style::ALL
+                .iter()
+                .map(|style| style.name().to_string())
+                .collect(),
+            Style::ALL
+                .iter()
+                .position(|style| *style == self.appearance.style),
+            |index| Style::ALL.get(index).copied().map(Msg::Restyle),
+        ));
+        entries.push(SettingEntry::Note(
+            "Changing the style relaunches Meow.".to_string(),
+        ));
         entries
     }
 }
@@ -289,15 +297,11 @@ impl Feature for Theme {
         self.load_error.as_deref().map(crate::app::unsaved)
     }
 
-    fn menu(&self) -> Vec<MenuEntry> {
-        vec![MenuEntry::Submenu {
-            title: "Theme".to_string(),
-            entries: self.theme_entries(),
+    fn settings(&self) -> Vec<SettingsSection> {
+        vec![SettingsSection {
+            title: "Appearance",
+            entries: self.appearance_entries(),
         }]
-    }
-
-    fn menu_section(&self) -> MenuSection {
-        MenuSection::Cat
     }
 
     fn is_busy(&self) -> bool {
@@ -310,13 +314,33 @@ impl Feature for Theme {
     }
 }
 
-/// A menu item sending `message` each time it is chosen.
-fn action(inbox: &Sender<Msg>, title: String, checked: bool, message: Msg) -> MenuEntry {
+/// A button sending `message` each time it is pressed.
+fn button(inbox: &Sender<Msg>, title: String, message: Msg) -> SettingEntry {
     let inbox = inbox.clone();
-    MenuEntry::Action {
+    SettingEntry::Button {
         title,
-        checked,
         run: Box::new(move || inbox.send(message.clone())),
+    }
+}
+
+/// A choice among `options`, sending what `message` makes of the index picked.
+fn choice(
+    inbox: &Sender<Msg>,
+    title: &str,
+    options: Vec<String>,
+    selected: Option<usize>,
+    message: impl Fn(usize) -> Option<Msg> + 'static,
+) -> SettingEntry {
+    let inbox = inbox.clone();
+    SettingEntry::Choice {
+        title: title.to_string(),
+        options,
+        selected,
+        pick: Box::new(move |index| {
+            if let Some(message) = message(index) {
+                inbox.send(message);
+            }
+        }),
     }
 }
 

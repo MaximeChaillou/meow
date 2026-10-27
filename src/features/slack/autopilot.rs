@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use meow::activity::{Kind, Link, Note};
-use meow::autopilot::{self, ActionState, Folder, Job, Jobs, Origin, Stage};
+use meow::autopilot::{self, ActionState, Folder, Instructions, Job, Jobs, Origin, Stage};
 use meow::claude::{ClaudeEvent, Run};
 use meow::guard::{self, Call};
 use meow::slack::model::Message;
@@ -22,6 +22,7 @@ use crate::ui::autopilot_page::{self, AutopilotAction, TAG_STRIDE};
 
 use super::{Slack, SlackSettings, now_secs};
 use crate::app::feature::Host;
+use crate::ui::sidebar::Page;
 
 /// A conversation is triaged once quiet this long, so a request written in
 /// several messages is read whole.
@@ -128,7 +129,7 @@ impl Slack {
     /// A control of the Autopilot page.
     pub(super) fn autopilot_action(&mut self, action: AutopilotAction, host: &mut dyn Host) {
         match action {
-            AutopilotAction::Toggle => self.toggle_autopilot(host),
+            AutopilotAction::OpenSettings => host.open_page(Page::Settings),
             AutopilotAction::Approve(tag) => self.decide_autopilot(tag, true, host),
             AutopilotAction::Reject(tag) => self.decide_autopilot(tag, false, host),
             AutopilotAction::Dismiss(row) => self.dismiss_autopilot(row, host),
@@ -144,9 +145,8 @@ impl Slack {
             }
             AutopilotAction::Feedback => {
                 let text = self.autopilot_page().take_feedback();
-                self.send_autopilot_feedback(&text, host);
+                self.send_autopilot_feedback(&text);
             }
-            AutopilotAction::RemoveFeedback(index) => self.remove_autopilot_feedback(index, host),
         }
     }
 
@@ -168,10 +168,9 @@ impl Slack {
         replied
     }
 
-    /// `text` typed in the feedback field: for the job replied to, which
-    /// works again following it, else for every job from now on.
-    pub(super) fn send_autopilot_feedback(&mut self, text: &str, host: &mut dyn Host) {
-        // The page shows a job that no longer takes feedback as every job's field.
+    /// `text` typed in the feedback field, for the job replied to: it works
+    /// again following it. Dropped when no job takes it now.
+    pub(super) fn send_autopilot_feedback(&mut self, text: &str) {
         let jobs = &self.autopilot.jobs;
         let replying = self
             .autopilot
@@ -179,7 +178,8 @@ impl Slack {
             .filter(|id| jobs.get(*id).is_some_and(|job| job.takes_feedback()));
         let Some(id) = replying else {
             self.autopilot.replying = None;
-            return self.add_autopilot_feedback(text, host);
+            self.autopilot_dirty = true;
+            return;
         };
         if self.autopilot.jobs.follow_up(id, text) {
             self.autopilot.replying = None;
@@ -188,45 +188,14 @@ impl Slack {
         self.autopilot_dirty = true;
     }
 
-    /// Remembers `text` for every job from now on.
-    pub(super) fn add_autopilot_feedback(&mut self, text: &str, host: &mut dyn Host) {
-        let feedback = autopilot::add_feedback(&self.settings.autopilot_feedback, text);
-        self.set_autopilot_feedback(feedback, host);
-    }
-
-    /// Forgets the feedback at `index`.
-    pub(super) fn remove_autopilot_feedback(&mut self, index: usize, host: &mut dyn Host) {
-        let feedback = self
-            .settings
-            .autopilot_feedback
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != index)
-            .map(|(_, f)| f.clone())
-            .collect();
-        self.set_autopilot_feedback(feedback, host);
-    }
-
-    fn set_autopilot_feedback(&mut self, feedback: Vec<String>, host: &mut dyn Host) {
-        if feedback == self.settings.autopilot_feedback {
-            return;
+    /// What the user told Autopilot in Settings, with their `rules` file.
+    fn autopilot_instructions<'a>(&'a self, rules: Option<&'a str>) -> Instructions<'a> {
+        let said = |text: &'a str| Some(text).filter(|t| !t.trim().is_empty());
+        Instructions {
+            rules,
+            when: said(&self.settings.autopilot_when),
+            how: said(&self.settings.autopilot_how),
         }
-        self.settings = SlackSettings {
-            autopilot_feedback: feedback,
-            ..self.settings.clone()
-        };
-        if let Err(error) = host.settings().set(&self.settings) {
-            eprintln!("meow: {error}");
-        }
-        self.autopilot_dirty = true;
-    }
-
-    /// The user's rules file and feedback, for the triage and the work.
-    fn autopilot_rules(&self) -> Option<String> {
-        autopilot::rules(
-            autopilot::user_rules().as_deref(),
-            &self.settings.autopilot_feedback,
-        )
     }
 
     /// `message`, from `from`, is for the user: triage its conversation (or
@@ -308,11 +277,15 @@ impl Slack {
         let Some(env) = host.claude() else {
             return self.leave_alone(&waiting, "Claude Code wasn't found", host);
         };
+        let kind = self.slack.kind_of(&waiting.channel);
+        let place = autopilot::place(kind, waiting.message.thread_ts.is_some());
+        let rules = autopilot::user_rules();
         let prompt = autopilot::triage_prompt(
             &self.me(),
             &waiting.from,
+            place,
             &self.conversation_text(&waiting),
-            self.autopilot_rules().as_deref(),
+            &self.autopilot_instructions(rules.as_deref()),
         );
         match Run::start_offline(env, &prompt) {
             Ok(run) => self.autopilot.triage = Some((run, waiting)),
@@ -523,9 +496,14 @@ impl Slack {
             .session
             .as_deref()
             .zip(autopilot::follow_up_prompt(&job, &self.me()));
+        let rules = autopilot::user_rules();
         let prompt = match &resumed {
             Some((_, prompt)) => prompt.clone(),
-            None => autopilot::work_prompt(&job, &self.me(), self.autopilot_rules().as_deref()),
+            None => autopilot::work_prompt(
+                &job,
+                &self.me(),
+                &self.autopilot_instructions(rules.as_deref()),
+            ),
         };
         let session = resumed.map(|(session, _)| session);
         match Run::start_guarded(env, &prompt, session, &model, &cwd, &held, None) {
@@ -731,17 +709,15 @@ impl Slack {
     }
 
     pub(super) fn toggle_autopilot(&mut self, host: &mut dyn Host) {
-        self.settings = SlackSettings {
+        let settings = SlackSettings {
             autopilot: !self.settings.autopilot,
             ..self.settings.clone()
         };
-        if !self.settings.autopilot {
+        if !settings.autopilot {
             self.autopilot.waiting.clear();
         }
-        if let Err(error) = host.settings().set(&self.settings) {
-            eprintln!("meow: {error}");
-        }
-        self.render_autopilot(host);
+        self.save_settings(settings, host);
+        self.autopilot_dirty = true;
     }
 
     /// Approves (or rejects) the action a button's `tag` points at.
@@ -828,13 +804,8 @@ impl Slack {
             .replying
             .and_then(|id| jobs.get(id))
             .filter(|job| job.takes_feedback());
-        self.autopilot_page().render(
-            jobs,
-            self.settings.autopilot,
-            &self.settings.autopilot_feedback,
-            replying,
-            now_secs(),
-        );
+        self.autopilot_page()
+            .render(jobs, self.settings.autopilot, replying, now_secs());
         host.set_badge(autopilot_page::PAGE_ID, jobs.waiting_count());
     }
 }

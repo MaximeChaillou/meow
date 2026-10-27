@@ -18,6 +18,7 @@ use meow::tasks::TaskList;
 use crate::app::agents::AgentSession;
 use crate::app::feature::Host;
 use crate::ui::menus::MenuEntry;
+use crate::ui::settings_page::{SettingEntry, SettingsSection};
 use crate::ui::sidebar::Page;
 
 #[derive(Default)]
@@ -46,7 +47,7 @@ pub(crate) struct FakeHost {
     pub(crate) worn: Vec<Coat>,
     /// Each size the chat bubble was given.
     pub(crate) sizes: Vec<(f64, f64)>,
-    pub(crate) menu_changes: usize,
+    pub(crate) settings_changes: usize,
     /// Conversations flagged with `!` over the cat.
     pub(crate) unread: Vec<ChatId>,
     /// Each page asked to open.
@@ -176,8 +177,8 @@ impl Host for FakeHost {
         self.sizes.push(size);
     }
 
-    fn menu_changed(&mut self) {
-        self.menu_changes += 1;
+    fn settings_changed(&mut self) {
+        self.settings_changes += 1;
     }
 
     fn set_badge(&mut self, page: &'static str, count: usize) {
@@ -193,44 +194,100 @@ impl Host for FakeHost {
     }
 }
 
-/// The entries as lines: `label: …`, `action: …` (`[x]` when checked), `---`,
-/// and a submenu's title then its entries, indented.
+/// The entries as lines: `label: …` and `action: …` (`[x]` when checked).
 pub(crate) fn describe(entries: &[MenuEntry]) -> Vec<String> {
     entries
         .iter()
-        .flat_map(|entry| match entry {
-            MenuEntry::Label(text) => vec![format!("label: {text}")],
-            MenuEntry::Separator => vec!["---".to_string()],
+        .map(|entry| match entry {
+            MenuEntry::Label(text) => format!("label: {text}"),
             MenuEntry::Action { title, checked, .. } => {
                 let mark = if *checked { "[x] " } else { "" };
-                vec![format!("{mark}action: {title}")]
+                format!("{mark}action: {title}")
             }
-            MenuEntry::Submenu { title, entries } => std::iter::once(format!("{title}:"))
-                .chain(
-                    describe(entries)
-                        .into_iter()
-                        .map(|line| format!("  {line}")),
-                )
-                .collect(),
         })
         .collect()
 }
 
-/// Chooses the item at `path`: submenu titles, then the item's title.
-pub(crate) fn click(entries: &[MenuEntry], path: &[&str]) {
-    let Some((first, rest)) = path.split_first() else {
-        panic!("empty menu path");
-    };
+/// Chooses the item titled `title`.
+pub(crate) fn click(entries: &[MenuEntry], title: &str) {
     for entry in entries {
-        match entry {
-            MenuEntry::Action { title, run, .. } if title == first && rest.is_empty() => {
-                return run();
-            }
-            MenuEntry::Submenu { title, entries } if title == first => {
-                return click(entries, rest);
-            }
-            _ => {}
+        if let MenuEntry::Action { title: t, run, .. } = entry
+            && t == title
+        {
+            return run();
         }
     }
-    panic!("no menu item {path:?} in {:#?}", describe(entries));
+    panic!("no menu item {title:?} in {:#?}", describe(entries));
+}
+
+/// The sections as lines: `# Title`, then each entry: `note: …`,
+/// `toggle: …` (`[x]` when on), `choice: Title = A | [B] | C` (the selected
+/// one in brackets), `text: Title = value` and `button: …`.
+pub(crate) fn describe_settings(sections: &[SettingsSection]) -> Vec<String> {
+    sections
+        .iter()
+        .flat_map(|section| {
+            let entries = section.entries.iter().map(|entry| match entry {
+                SettingEntry::Note(text) => format!("note: {text}"),
+                SettingEntry::Toggle { title, on, .. } => {
+                    let mark = if *on { "[x] " } else { "" };
+                    format!("{mark}toggle: {title}")
+                }
+                SettingEntry::Choice {
+                    title,
+                    options,
+                    selected,
+                    ..
+                } => {
+                    let options: Vec<String> = options
+                        .iter()
+                        .enumerate()
+                        .map(|(index, option)| match *selected == Some(index) {
+                            true => format!("[{option}]"),
+                            false => option.clone(),
+                        })
+                        .collect();
+                    format!("choice: {title} = {}", options.join(" | "))
+                }
+                SettingEntry::Text { title, value, .. } => format!("text: {title} = {value}"),
+                SettingEntry::Button { title, .. } => format!("button: {title}"),
+            });
+            std::iter::once(format!("# {}", section.title)).chain(entries)
+        })
+        .collect()
+}
+
+/// Uses entry `title` of section `section`: flips a toggle, presses a button,
+/// picks option `value` of a choice, or saves `value` as a text's.
+pub(crate) fn change_setting(
+    sections: &[SettingsSection],
+    section: &str,
+    title: &str,
+    value: &str,
+) {
+    let entry = sections
+        .iter()
+        .filter(|s| s.title == section)
+        .flat_map(|s| &s.entries)
+        .find(|entry| match entry {
+            SettingEntry::Note(_) => false,
+            SettingEntry::Toggle { title: t, .. }
+            | SettingEntry::Choice { title: t, .. }
+            | SettingEntry::Text { title: t, .. }
+            | SettingEntry::Button { title: t, .. } => t == title,
+        });
+    match entry {
+        Some(SettingEntry::Toggle { run, .. } | SettingEntry::Button { run, .. }) => run(),
+        Some(SettingEntry::Choice { options, pick, .. }) => {
+            let Some(index) = options.iter().position(|option| option == value) else {
+                panic!("no option {value:?} in {title:?}: {options:?}");
+            };
+            pick(index)
+        }
+        Some(SettingEntry::Text { save, .. }) => save(value.to_string()),
+        Some(SettingEntry::Note(_)) | None => panic!(
+            "no setting {section} › {title} in {:#?}",
+            describe_settings(sections)
+        ),
+    }
 }

@@ -2,8 +2,21 @@
 
 The sidebar's **Autopilot** page lets Meow start work by itself when a Slack
 message asks you for something: "your PR #42 has conflicts", "can you look at
-why the build fails", "send me the numbers for X". Turn it on with **Turn on**
-on the page (it is off by default).
+why the build fails", "send me the numbers for X". Turn it on in
+**Settings › Autopilot** with **Prepare work from Slack messages** (it is off
+by default); **Settings** on the Autopilot page goes there.
+
+- **When to start:** in Settings › Autopilot, say which messages Autopilot
+  should prepare work for, in your own words, e.g. "Only private messages
+  about a coding task". The triage follows it over its own rules. It is told
+  where each message was written (a direct message, a group one, a channel
+  mentioning you, a thread) so it can tell private messages apart. Empty, it
+  takes any message asking you for something.
+- **How to work:** in the same place, say how the work should be done, e.g.
+  "For coding tasks, open a new task in Superset in the right workspace, and
+  open a draft PR at the end". The work follows it over its own instructions,
+  except that what cannot be undone (opening the PR included) still waits for
+  your approval. Return saves either one, as does leaving the field.
 
 - **Triage:** once a DM, group message or mention (in a thread too) has been
   quiet for 30 seconds (so a request written in several messages is read
@@ -11,8 +24,8 @@ on the page (it is off by default).
   (or the thread's) and decides whether there is work to prepare. This works
   in any conversation, open in Meow or not, and leaves it unread. Greetings,
   news and decisions only you can make are left alone, as is a conversation
-  you already answered. Add your own rules in `~/.config/meow/autopilot.md`,
-  e.g. "Only for messages from Axel". The last messages it made no job of are
+  you already answered. Rules in `~/.config/meow/autopilot.md`, if you keep
+  that file, apply to both the triage and the work. The last messages it made no job of are
   listed under the jobs, each with why (no work, already answered, an answer
   it could not read, a failure).
 - **Work:** one job at a time, with your usual tools and connectors. The
@@ -46,20 +59,15 @@ on the page (it is off by default).
   exact input, once. Results land in Activity, and the
   sidebar shows how many jobs wait for you.
 
-- **Feedback:** type how Autopilot should work in the box at the bottom of the
-  page, e.g. "Open the PR only, don't message on Slack", and press Return or
-  **Save**. Feedback is listed at the top of the page (`×` forgets it) and
-  every job from then on follows it, in the triage and in the work, along with
-  `~/.config/meow/autopilot.md`. Actions already waiting are left as they are:
-  reject the ones you don't want.
 - **Feedback on one job:** once a job ran (done or failed, with no approved
-  call next up), **Give feedback** on its card points the same box at it:
+  call next up), **Give feedback** on its card points the box at the bottom at it:
   type what it should do instead ("rebase, don't merge", "answer in
   English") and press Return or **Send**. Its calls still waiting are
   rejected, and the job queues again: it resumes its Claude session in the
   same worktree, told what you said and which calls were made, and holds
   again what it still wants to do. What you said shows on the card. Esc or
-  **Cancel feedback** points the box back at every job.
+  **Cancel feedback** leaves the job as it is. Feedback once kept for every
+  job now lives at the end of **How to work**.
 
 `×` removes a job and its worktree; **Open folder** shows the worktree in
 Finder. Jobs are saved in `~/Library/Application Support/Meow/autopilot.json`,

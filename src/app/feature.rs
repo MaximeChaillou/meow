@@ -23,6 +23,7 @@ use crate::ui::chat_window::{PageKit, PageView};
 use crate::ui::controller::Controller;
 use crate::ui::menus::{self, MenuEntry, MenuSection};
 use crate::ui::notify;
+use crate::ui::settings_page::SettingsSection;
 use crate::ui::sidebar::{Page, PageSpec};
 
 pub(crate) trait Feature {
@@ -52,8 +53,8 @@ pub(crate) trait Feature {
         text.to_string()
     }
 
-    /// Items for the cat's menu, in `menu_section`. Asked again after the
-    /// feature calls `Host::menu_changed`.
+    /// Items for the cat's menu, in `menu_section`. Asked each time the
+    /// menu is filled again.
     fn menu(&self) -> Vec<MenuEntry> {
         Vec::new()
     }
@@ -61,6 +62,12 @@ pub(crate) trait Feature {
     /// Where `menu`'s items go: above "Quit Meow" unless said otherwise.
     fn menu_section(&self) -> MenuSection {
         MenuSection::App
+    }
+
+    /// The feature's sections of the Settings page, in order. Asked again
+    /// after the feature calls `Host::settings_changed`.
+    fn settings(&self) -> Vec<SettingsSection> {
+        Vec::new()
     }
 
     /// The feature's pages in the sidebar.
@@ -188,8 +195,8 @@ pub(crate) trait Host {
     fn wear(&mut self, coat: Coat);
     /// The chat bubble's size, in points; it is fitted to the screen.
     fn resize_chat(&mut self, size: (f64, f64));
-    /// The feature's menu items changed: the cat's menu asks for them again.
-    fn menu_changed(&mut self);
+    /// The feature's settings changed: the Settings page asks for them again.
+    fn settings_changed(&mut self);
     /// The count shown at the end of `page`'s row in the sidebar.
     fn set_badge(&mut self, page: &'static str, count: usize);
     /// Nothing the user would lose to a restart: no run, no open chat, no
@@ -329,8 +336,8 @@ impl Host for AppHost<'_> {
         self.app.chat.set_size(size);
     }
 
-    fn menu_changed(&mut self) {
-        self.app.menu_changed = true;
+    fn settings_changed(&mut self) {
+        self.app.settings_changed = true;
     }
 
     fn record(&mut self, note: Note) {
@@ -397,6 +404,11 @@ impl App {
         if std::mem::take(&mut self.menu_changed) {
             self.fill_cat_menu();
         }
+        // Not under the user's typing or click: tried again each tick until done.
+        if self.settings_changed && !self.chat.settings().in_use() {
+            self.settings_changed = false;
+            self.render_settings();
+        }
         if std::mem::take(&mut self.quitting) {
             self.quit();
         }
@@ -420,6 +432,12 @@ impl App {
             entries(MenuSection::App),
             self.coat.is_pig(),
         );
+    }
+
+    /// Draws the Settings page with the features' sections as they are now.
+    pub(super) fn render_settings(&self) {
+        let sections = self.features.iter().flat_map(|f| f.settings()).collect();
+        self.chat.settings().render(sections);
     }
 
     /// Whether a feature is doing something the user waits on.
@@ -474,6 +492,10 @@ impl App {
                 .iter_mut()
                 .filter(|f| f.pages().iter().any(|spec| spec.id == id))
                 .for_each(|f| f.page_shown(id));
+        }
+        if page == Page::Settings && !self.chat.settings().in_use() {
+            self.settings_changed = false;
+            self.render_settings();
         }
         self.chat.show_page(page);
     }

@@ -8,8 +8,7 @@ use meow::style::Style;
 
 use super::Theme;
 use crate::app::feature::Feature;
-use crate::features::testing::{FakeHost, click, describe};
-use crate::ui::menus::MenuSection;
+use crate::features::testing::{FakeHost, change_setting, describe_settings};
 
 fn no_photo() -> Option<PathBuf> {
     None
@@ -55,34 +54,29 @@ fn the_first_poll_dresses_the_cat_and_sizes_the_bubble_as_saved() {
 }
 
 #[test]
-fn the_theme_menu_lists_coats_photo_themes_window_sizes_and_styles() {
+fn the_appearance_settings_list_coats_photo_themes_window_sizes_and_styles() {
     let feature = theme(Appearance::default().with_custom(mochi()));
-    assert_eq!(feature.menu_section(), MenuSection::Cat);
+    assert!(
+        feature.menu().is_empty(),
+        "the cat's menu opens Settings instead"
+    );
     assert_eq!(
-        describe(&feature.menu()),
+        describe_settings(&feature.settings()),
         [
-            "Theme:",
-            "  action: Ginger",
-            "  action: Willow",
-            "  action: Alfie",
-            "  action: Dédé",
-            "  action: Corgi",
-            "  ---",
-            "  [x] action: Mochi",
-            "  ---",
-            "  action: Add from Cat Photo…",
-            "  action: Remove \u{201c}Mochi\u{201d}",
-            "  ---",
-            "  label: Window Size",
-            "  [x] action: Standard",
-            "  action: Large",
-            "  action: Extra Large",
-            "  ---",
-            "  label: Style (relaunches Meow)",
-            "  [x] action: Pixel Art",
-            "  action: Classic",
+            "# Appearance",
+            "choice: Theme = Ginger | Willow | Alfie | Dédé | Corgi | [Mochi]",
+            "button: Add from Cat Photo…",
+            "button: Remove \u{201c}Mochi\u{201d}",
+            "choice: Window size = [Standard] | Large | Extra Large",
+            "choice: Style = [Pixel Art] | Classic",
+            "note: Changing the style relaunches Meow.",
         ]
     );
+}
+
+/// Uses entry `title` of the Appearance settings, with `value` for a choice.
+fn change(feature: &Theme, title: &str, value: &str) {
+    change_setting(&feature.settings(), "Appearance", title, value);
 }
 
 #[test]
@@ -90,15 +84,18 @@ fn picking_a_coat_wears_and_saves_it() {
     let mut feature = theme(Appearance::default());
     let mut host = FakeHost::default();
     feature.poll(&mut host);
-    click(&feature.menu(), &["Theme", "Willow"]);
+    change(&feature, "Theme", "Willow");
     feature.poll(&mut host);
     assert_eq!(host.worn.last(), Some(&Coat::Willow));
     assert_eq!(
         host.settings.get::<Appearance>().unwrap().coat,
         Coat::Willow
     );
-    assert_eq!(host.menu_changes, 1);
-    assert!(describe(&feature.menu()).contains(&"  [x] action: Willow".to_string()));
+    assert_eq!(host.settings_changes, 1);
+    assert_eq!(
+        describe_settings(&feature.settings())[1],
+        "choice: Theme = Ginger | [Willow] | Alfie | Dédé | Corgi"
+    );
 }
 
 #[test]
@@ -106,7 +103,7 @@ fn picking_a_window_size_resizes_the_bubble_and_saves_it() {
     let mut feature = theme(Appearance::default());
     let mut host = FakeHost::default();
     feature.poll(&mut host);
-    click(&feature.menu(), &["Theme", "Extra Large"]);
+    change(&feature, "Window size", "Extra Large");
     feature.poll(&mut host);
     assert_eq!(host.sizes.last(), Some(&WindowSize::Huge.points()));
     assert_eq!(
@@ -120,7 +117,7 @@ fn picking_a_style_saves_it_and_asks_for_a_restart_outside_the_app() {
     let mut feature = theme(Appearance::default());
     let mut host = FakeHost::default();
     feature.poll(&mut host);
-    click(&feature.menu(), &["Theme", "Classic"]);
+    change(&feature, "Style", "Classic");
     feature.poll(&mut host);
     assert_eq!(
         host.settings.get::<Appearance>().unwrap().style,
@@ -139,7 +136,7 @@ fn removing_the_worn_photo_theme_goes_back_to_ginger() {
     let mut feature = theme(Appearance::default().with_custom(mochi()));
     let mut host = FakeHost::default();
     feature.poll(&mut host);
-    click(&feature.menu(), &["Theme", "Remove \u{201c}Mochi\u{201d}"]);
+    change(&feature, "Remove \u{201c}Mochi\u{201d}", "");
     feature.poll(&mut host);
     assert_eq!(host.worn.last(), Some(&Coat::Ginger));
     assert!(
@@ -156,7 +153,7 @@ fn cancelling_the_photo_picker_does_nothing() {
     let mut feature = theme(Appearance::default());
     let mut host = FakeHost::default();
     feature.poll(&mut host);
-    click(&feature.menu(), &["Theme", "Add from Cat Photo…"]);
+    change(&feature, "Add from Cat Photo…", "");
     feature.poll(&mut host);
     assert!(!feature.thinking());
     assert!(host.errors.is_empty());
@@ -167,7 +164,7 @@ fn a_photo_before_claude_is_ready_says_so_with_a_bang_over_the_cat() {
     let mut feature = Theme::new(Ok(Appearance::default()), a_photo);
     let mut host = FakeHost::default();
     feature.poll(&mut host);
-    click(&feature.menu(), &["Theme", "Add from Cat Photo…"]);
+    change(&feature, "Add from Cat Photo…", "");
     feature.poll(&mut host);
     assert_eq!(
         host.errors,
@@ -187,7 +184,7 @@ fn picking_the_size_already_worn_resizes_the_bubble_again() {
     let mut feature = theme(Appearance::default());
     let mut host = FakeHost::default();
     feature.poll(&mut host);
-    click(&feature.menu(), &["Theme", "Standard"]);
+    change(&feature, "Window size", "Standard");
     feature.poll(&mut host);
     assert_eq!(
         host.sizes,

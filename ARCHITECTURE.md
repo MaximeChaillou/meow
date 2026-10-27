@@ -46,11 +46,13 @@ A feature lives in `src/features/<name>/` and owns:
 - **its messages**: a private `enum Msg`, sent through its `Mailbox<Msg>` by
   its menu items, buttons and commands, and drained in `poll`;
 - **its UI wiring**: menu items as `MenuEntry` values (actions, check marks,
-  labels, separators, submenus) whose closures send to the mailbox
-  (`ui::action::Action` does the same for buttons);
+  labels) whose closures send to the mailbox (`ui::action::Action` does the
+  same for buttons);
 - **its settings**: its own `#[serde(default)]` struct, read with
   `Store::get` and saved with `Store::set`, which leaves the other owners'
-  fields alone (`settings.json` stays one flat file);
+  fields alone (`settings.json` stays one flat file), and its sections of the
+  Settings page as `SettingsSection` values (toggles, choices, texts,
+  buttons, notes) whose closures send to the mailbox, like menu items;
 - **its page**, if any: a `PageSpec` (sidebar row, header, count chip) and the
   view it builds and draws itself (`features/routines/page.rs`);
 - **its part in the chat**: `/name` commands, text added to each chat prompt,
@@ -71,6 +73,7 @@ pub(crate) trait Feature {
     fn read_reply(&mut self, chat: &ChatId, text: &str, done: bool) -> String; // its blocks out
     fn menu(&self) -> Vec<MenuEntry>;                    // cat's menu items
     fn menu_section(&self) -> MenuSection;               // with the cat's, or above Quit
+    fn settings(&self) -> Vec<SettingsSection>;          // its part of the Settings page
     fn pages(&self) -> Vec<PageSpec>;                    // sidebar rows, in `order`
     fn build_page(&mut self, id, kit: &PageKit) -> Option<PageView>;   // once each, at launch
     fn page_shown(&mut self, id);                        // about to be shown
@@ -93,7 +96,7 @@ agents, read and change
 the task list (then say it changed), show a status in the Tasks header, read
 the quick actions and their results, update a day plan's agenda, run a quick
 action, read and save its settings,
-dress the cat, size the chat bubble, have its menu items asked for again, set its
+dress the cat, size the chat bubble, have its Settings sections asked for again, set its
 sidebar count, ask whether the app is idle, quit. When a feature needs
 something new from the app, add one method to `Host` rather than handing out
 `App`. Features do not call each other.
@@ -150,6 +153,8 @@ The rest is the app itself, shared by everything else; it stays in
   the background check and Slack all use;
 - Activity (`activity.rs`): features write to it, its items open their pages
   (`Feature::open_link`), and it drives the news bubble over the cat;
+- the Settings page (`ui/settings_page.rs`, drawn in `feature.rs`): the
+  features' sections, in their order, at the bottom of the sidebar;
 - coding agents (`agents.rs`), started from the chat's `/agent` and from
   Slack's panel;
 - the calendar tools found at launch (`calendar.rs`), used by Slack, the

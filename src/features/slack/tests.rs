@@ -4,7 +4,7 @@ use meow::guard::Call;
 
 use super::{Slack, SlackSettings};
 use crate::app::feature::Feature;
-use crate::features::testing::FakeHost;
+use crate::features::testing::{FakeHost, change_setting, describe_settings};
 use crate::ui::sidebar::Page;
 use crate::ui::{autopilot_page, slack_page};
 
@@ -51,23 +51,96 @@ fn esc_away_from_the_slack_page_is_left_to_the_app() {
 }
 
 #[test]
-fn autopilot_feedback_is_saved_and_can_be_removed() {
+fn slack_and_autopilot_settings_are_listed() {
+    let feature = slack();
+    assert!(feature.menu().is_empty());
+    assert_eq!(
+        describe_settings(&feature.settings()),
+        [
+            "# Slack",
+            "toggle: Write drafts like me",
+            "button: Learn my style",
+            "# Autopilot",
+            "toggle: Prepare work from Slack messages",
+            "note: Nothing that can't be undone (a push, a message sent, an issue changed) \
+             happens until you approve it on the Autopilot page.",
+            "text: When to start = ",
+            "text: How to work = ",
+        ]
+    );
+}
+
+#[test]
+fn writing_like_me_is_turned_on_from_settings() {
     let mut feature = slack();
     let mut host = FakeHost::default();
-    feature.add_autopilot_feedback("Only open the PR,\n no Slack message", &mut host);
-    feature.add_autopilot_feedback("Answer in French", &mut host);
-    feature.add_autopilot_feedback("   ", &mut host);
+    change_setting(&feature.settings(), "Slack", "Write drafts like me", "");
+    feature.handle_messages(&mut host);
     let saved: SlackSettings = host.settings.get().unwrap();
+    assert!(saved.write_as_me);
+    assert_eq!(feature.settings, saved);
+    assert!(host.settings_changes > 0, "Settings shows it");
+}
+
+#[test]
+fn autopilot_is_turned_on_and_told_when_and_how_from_settings() {
+    let mut feature = slack();
+    let mut host = FakeHost::default();
+    let settings = feature.settings();
+    change_setting(
+        &settings,
+        "Autopilot",
+        "Prepare work from Slack messages",
+        "",
+    );
+    change_setting(
+        &settings,
+        "Autopilot",
+        "When to start",
+        "  Only private messages about a coding task\n",
+    );
+    change_setting(
+        &settings,
+        "Autopilot",
+        "How to work",
+        "Open a draft PR at the end",
+    );
+    feature.handle_messages(&mut host);
+    let saved: SlackSettings = host.settings.get().unwrap();
+    assert!(saved.autopilot);
     assert_eq!(
-        saved.autopilot_feedback,
-        ["Only open the PR, no Slack message", "Answer in French"]
+        saved.autopilot_when,
+        "Only private messages about a coding task"
+    );
+    assert_eq!(saved.autopilot_how, "Open a draft PR at the end");
+    assert_eq!(feature.settings, saved);
+    assert!(
+        describe_settings(&feature.settings())
+            .contains(&"[x] toggle: Prepare work from Slack messages".to_string())
     );
 
-    feature.remove_autopilot_feedback(0, &mut host);
-    feature.remove_autopilot_feedback(5, &mut host);
+    change_setting(&feature.settings(), "Autopilot", "When to start", "   ");
+    feature.handle_messages(&mut host);
+    assert_eq!(
+        host.settings.get::<SlackSettings>().unwrap().autopilot_when,
+        ""
+    );
+}
+
+#[test]
+fn feedback_kept_before_is_moved_into_how_to_work_once() {
+    let saved = SlackSettings {
+        autopilot_how: "Open a draft PR".into(),
+        autopilot_feedback: vec!["Answer in French".into()],
+        ..SlackSettings::default()
+    };
+    let mut feature = Slack::signed_out(Ok(saved));
+    let mut host = FakeHost::default();
+    feature.handle_messages(&mut host);
+    feature.handle_messages(&mut host);
     let saved: SlackSettings = host.settings.get().unwrap();
-    assert_eq!(saved.autopilot_feedback, ["Answer in French"]);
-    assert_eq!(feature.settings, saved);
+    assert_eq!(saved.autopilot_how, "Open a draft PR\n- Answer in French");
+    assert!(saved.autopilot_feedback.is_empty());
 }
 
 /// `feature` with a job that ran and waits for a push to be approved.
@@ -100,21 +173,22 @@ fn with_a_finished_job(feature: &mut Slack) -> u64 {
 #[test]
 fn feedback_given_while_replying_to_a_job_goes_to_that_job_only() {
     let mut feature = slack();
-    let mut host = FakeHost::default();
     let id = with_a_finished_job(&mut feature);
     feature.reply_to_autopilot(id);
     assert_eq!(feature.autopilot.replying, Some(id));
 
-    feature.send_autopilot_feedback("Rebase instead of merging", &mut host);
+    feature.send_autopilot_feedback("Rebase instead of merging");
     let job = feature.autopilot.jobs.get(id).unwrap();
     assert_eq!(job.feedback, ["Rebase instead of merging"]);
     assert_eq!(job.stage, Stage::Queued);
     assert_eq!(feature.autopilot.replying, None);
-    assert!(feature.settings.autopilot_feedback.is_empty());
 
-    feature.send_autopilot_feedback("Answer in French", &mut host);
-    assert_eq!(feature.settings.autopilot_feedback, ["Answer in French"]);
-    assert_eq!(feature.autopilot.jobs.get(id).unwrap().feedback.len(), 1);
+    feature.send_autopilot_feedback("Answer in French");
+    assert_eq!(
+        feature.autopilot.jobs.get(id).unwrap().feedback.len(),
+        1,
+        "with no job replied to, the box sends nothing"
+    );
 }
 
 #[test]
@@ -133,15 +207,13 @@ fn replying_to_a_job_is_toggled_and_only_once_it_ran() {
 }
 
 #[test]
-fn feedback_goes_to_every_job_once_the_job_replied_to_makes_a_call() {
+fn feedback_is_dropped_once_the_job_replied_to_makes_a_call() {
     let mut feature = slack();
-    let mut host = FakeHost::default();
     let id = with_a_finished_job(&mut feature);
     feature.reply_to_autopilot(id);
     let jobs = &mut feature.autopilot.jobs;
     jobs.set_action(id, 0, ActionState::Approved, None);
-    feature.send_autopilot_feedback("Answer in French", &mut host);
-    assert_eq!(feature.settings.autopilot_feedback, ["Answer in French"]);
+    feature.send_autopilot_feedback("Answer in French");
     assert!(feature.autopilot.jobs.get(id).unwrap().feedback.is_empty());
     assert_eq!(feature.autopilot.replying, None);
 }
@@ -149,10 +221,9 @@ fn feedback_goes_to_every_job_once_the_job_replied_to_makes_a_call() {
 #[test]
 fn blank_feedback_to_a_job_keeps_replying_to_it() {
     let mut feature = slack();
-    let mut host = FakeHost::default();
     let id = with_a_finished_job(&mut feature);
     feature.reply_to_autopilot(id);
-    feature.send_autopilot_feedback("  ", &mut host);
+    feature.send_autopilot_feedback("  ");
     assert_eq!(feature.autopilot.replying, Some(id));
     assert_eq!(
         feature.autopilot.jobs.get(id).unwrap().stage,

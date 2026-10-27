@@ -312,6 +312,14 @@ impl SlackState {
         self.open.as_deref()
     }
 
+    /// Whether `channel` is a direct message, a group one or a channel, once listed.
+    pub(super) fn kind_of(&self, channel: &str) -> Option<ChannelKind> {
+        self.channels
+            .iter()
+            .find(|c| c.id == channel)
+            .map(|c| c.kind)
+    }
+
     /// The saved messages of `channel`, oldest first.
     pub(super) fn history(&self, channel: &str) -> &[Message] {
         self.cache.history(channel)
@@ -342,8 +350,6 @@ impl Slack {
             SlackAction::Ask => self.ask_slack(host),
             SlackAction::Autocomplete => self.autocomplete_slack(host),
             SlackAction::Agent => self.agent_slack(host),
-            SlackAction::ToggleWriteAsMe => self.toggle_write_as_me(host),
-            SlackAction::LearnMyStyle => self.learn_my_style(host),
             SlackAction::UseDraft => self.use_slack_draft(),
             SlackAction::CreateEvent => self.create_slack_event(host),
             SlackAction::CloseAssist => self.close_slack_assist(),
@@ -678,10 +684,7 @@ impl Slack {
                 &self.emoji.glyphs,
                 &self.emoji.images,
             ),
-            None => {
-                page.render_list(&self.slack.rows(now_secs()));
-                page.render_voice(&self.voice_bar_state());
-            }
+            None => page.render_list(&self.slack.rows(now_secs())),
         }
     }
 

@@ -30,7 +30,6 @@ use super::flipped::FlippedView;
 use super::link_button::LinkButton;
 use super::rich_text::{self, Attributes};
 use super::slack_assist::{self, AssistPanel, AssistView};
-use super::slack_voice_bar::{self, VoiceBar, VoiceBarState};
 use super::theme;
 use super::widgets;
 
@@ -83,10 +82,6 @@ pub enum SlackAction {
     Autocomplete,
     /// Have Claude propose a coding agent for the open conversation.
     Agent,
-    /// Turn drafting in the user's own style on or off.
-    ToggleWriteAsMe,
-    /// Learn the user's style from their Slack messages.
-    LearnMyStyle,
     /// Put Claude's draft in the reply box.
     UseDraft,
     /// Create the calendar event Claude proposed.
@@ -163,7 +158,6 @@ pub struct SlackPage {
     /// Has Claude propose a coding agent for the conversation.
     agent: Retained<NSButton>,
     /// "Write like me" controls, above the list.
-    voice: VoiceBar,
     assist: AssistPanel,
     back: Retained<NSButton>,
     convo_title: Retained<NSTextField>,
@@ -236,12 +230,7 @@ impl SlackPage {
         // --- List mode ----------------------------------------------------
         let list_scroll = NSScrollView::initWithFrame(
             NSScrollView::alloc(mtm),
-            rect(
-                MARGIN,
-                MARGIN,
-                width - 2.0 * MARGIN,
-                height - 3.0 * MARGIN - slack_voice_bar::HEIGHT,
-            ),
+            rect(MARGIN, MARGIN, width - 2.0 * MARGIN, height - 2.0 * MARGIN),
         );
         list_scroll.setHasVerticalScroller(true);
         list_scroll.setDrawsBackground(false);
@@ -253,18 +242,6 @@ impl SlackPage {
         list.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
         list_scroll.setDocumentView(Some(&list));
         view.addSubview(&list_scroll);
-
-        let voice = VoiceBar::new(
-            mtm,
-            &actions,
-            rect(
-                MARGIN,
-                height - MARGIN - slack_voice_bar::HEIGHT,
-                width - 2.0 * MARGIN,
-                slack_voice_bar::HEIGHT,
-            ),
-        );
-        view.addSubview(&voice.view);
 
         // --- Conversation mode --------------------------------------------
         // The strip and the reply bar live in a view of their own, so they
@@ -445,7 +422,6 @@ impl SlackPage {
             ask,
             auto,
             agent,
-            voice,
             assist,
             back,
             convo_title,
@@ -502,11 +478,6 @@ impl SlackPage {
         self.input.fit();
     }
 
-    /// Updates the "write like me" controls above the list.
-    pub fn render_voice(&self, state: &VoiceBarState) {
-        self.voice.render(state);
-    }
-
     /// Shows the private Claude panel above the reply box.
     pub fn show_assist(&self, content: &AssistView) {
         self.assist.show(content);
@@ -557,7 +528,6 @@ impl SlackPage {
         self.signin.setHidden(false);
         self.status.setHidden(false);
         self.list_scroll.setHidden(true);
-        self.voice.view.setHidden(true);
         self.set_conversation_hidden(true);
         let text = message.unwrap_or("Sign in with your usual Slack login.");
         self.status.setAttributedStringValue(&rich_text::attributed(
@@ -572,7 +542,6 @@ impl SlackPage {
         self.status.setHidden(true);
         self.set_conversation_hidden(true);
         self.list_scroll.setHidden(false);
-        self.voice.view.setHidden(false);
 
         let width = self.list_scroll.contentSize().width;
         for row in self.list.subviews().iter() {
@@ -618,7 +587,6 @@ impl SlackPage {
         self.signin.setHidden(true);
         self.status.setHidden(true);
         self.list_scroll.setHidden(true);
-        self.voice.view.setHidden(true);
         self.set_conversation_hidden(false);
         let (back, hint) = match in_thread {
             true => (BACK_TO_CONVERSATION, THREAD_REPLY_HINT),

@@ -12,22 +12,19 @@ use meow::actions::QuickAction;
 
 use super::action::Action;
 use super::controller::Controller;
+use super::events::{self, UiEvent};
+use super::sidebar::Page;
 
 /// An item a feature adds to the cat's menu (see `Feature::menu`).
 pub enum MenuEntry {
     /// A greyed-out line of information.
     Label(String),
-    Separator,
     /// Runs `run` when chosen; it should only send to the feature's mailbox.
     /// `checked` puts a check mark before it.
     Action {
         title: String,
         checked: bool,
         run: Box<dyn Fn()>,
-    },
-    Submenu {
-        title: String,
-        entries: Vec<MenuEntry>,
     },
 }
 
@@ -43,7 +40,6 @@ pub enum MenuSection {
 fn entry_item(mtm: MainThreadMarker, entry: MenuEntry) -> Retained<NSMenuItem> {
     match entry {
         MenuEntry::Label(text) => label(mtm, &text),
-        MenuEntry::Separator => NSMenuItem::separatorItem(mtm),
         MenuEntry::Action {
             title,
             checked,
@@ -57,15 +53,6 @@ fn entry_item(mtm: MainThreadMarker, entry: MenuEntry) -> Retained<NSMenuItem> {
             if checked {
                 entry.setState(NSControlStateValueOn);
             }
-            entry
-        }
-        MenuEntry::Submenu { title, entries } => {
-            let items: Vec<_> = entries
-                .into_iter()
-                .map(|entry| entry_item(mtm, entry))
-                .collect();
-            let entry = submenu_item(mtm, &menu(mtm, &title, &items));
-            entry.setTitle(&NSString::from_str(&title));
             entry
         }
     }
@@ -121,6 +108,16 @@ fn submenu_item(mtm: MainThreadMarker, submenu: &NSMenu) -> Retained<NSMenuItem>
     entry
 }
 
+/// "Settings…", opening the Settings page; `key` is its shortcut, if any.
+fn settings_item(mtm: MainThreadMarker, key: &str) -> Retained<NSMenuItem> {
+    let action = Action::new(mtm, || events::push(UiEvent::ShowPage(Page::Settings)));
+    let entry = item(mtm, "Settings…", Action::selector(), key, Some(&action));
+    // SAFETY: the item holds its represented object strongly, which keeps the
+    // action alive as long as the item; its target alone would not.
+    unsafe { entry.setRepresentedObject(Some(&action)) };
+    entry
+}
+
 /// Esc as a menu key equivalent works whatever has focus in the chat (input or transcript).
 fn escape_item(mtm: MainThreadMarker, target: &AnyObject) -> Retained<NSMenuItem> {
     let entry = item(mtm, "Cancel / Close", sel!(escape:), "\u{1b}", Some(target));
@@ -133,7 +130,11 @@ pub fn install_main_menu(mtm: MainThreadMarker, controller: &Controller) {
     let app_menu = menu(
         mtm,
         "Meow",
-        &[item(mtm, "Quit Meow", sel!(quit:), "q", Some(target))],
+        &[
+            settings_item(mtm, ","),
+            NSMenuItem::separatorItem(mtm),
+            item(mtm, "Quit Meow", sel!(quit:), "q", Some(target)),
+        ],
     );
     let edit_menu = menu(
         mtm,
@@ -206,6 +207,7 @@ pub fn fill_cat_menu(
             "",
             Some(target),
         ),
+        settings_item(mtm, ""),
         NSMenuItem::separatorItem(mtm),
         item(mtm, "Feed", sel!(feed:), "", Some(target)),
         item(mtm, "Let a Mouse In", sel!(releaseMouse:), "", Some(target)),

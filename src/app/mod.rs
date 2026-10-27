@@ -97,6 +97,8 @@ struct App {
     cat_menu: Retained<NSMenu>,
     /// A feature changed its menu items: the cat's menu is filled again.
     menu_changed: bool,
+    /// A feature's settings changed: the Settings page is drawn again.
+    settings_changed: bool,
     /// A feature asked to quit, done once the features are back (see
     /// `feature::after_features`).
     quitting: bool,
@@ -226,6 +228,8 @@ pub fn start(mtm: MainThreadMarker) {
         store,
         cat_menu,
         menu_changed: false,
+        // Drawn at the first tick, once the features are in place.
+        settings_changed: true,
         quitting: false,
         // Dressed by the appearance feature at the first tick, before drawing.
         coat: Coat::default(),

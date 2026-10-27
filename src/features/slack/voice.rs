@@ -12,8 +12,6 @@ use meow::claude::{ClaudeEvent, Run, STRONG_MODEL};
 use meow::slack::client::Command;
 use meow::slack::voice;
 
-use crate::ui::slack_voice_bar::VoiceBarState;
-
 use super::{Slack, SlackSettings};
 use crate::app::feature::Host;
 
@@ -31,9 +29,11 @@ enum Learning {
 
 pub(super) struct VoiceState {
     path: Option<PathBuf>,
-    guide: Option<String>,
+    /// The style guide learned, if any.
+    pub(super) guide: Option<String>,
     learning: Learning,
-    status: String,
+    /// Where learning is at, for Settings › Slack.
+    pub(super) status: String,
 }
 
 impl VoiceState {
@@ -68,7 +68,7 @@ impl VoiceState {
         }
     }
 
-    fn busy(&self) -> bool {
+    pub(super) fn busy(&self) -> bool {
         !matches!(self.learning, Learning::Idle)
     }
 }
@@ -83,15 +83,6 @@ impl Slack {
         }
     }
 
-    pub(super) fn voice_bar_state(&self) -> VoiceBarState<'_> {
-        VoiceBarState {
-            enabled: self.settings.write_as_me && self.voice.guide.is_some(),
-            learned: self.voice.guide.is_some(),
-            busy: self.voice.busy(),
-            status: &self.voice.status,
-        }
-    }
-
     /// Turns drafting in the user's style on or off; turning it on before any
     /// guide exists learns one first.
     pub(super) fn toggle_write_as_me(&mut self, host: &mut dyn Host) {
@@ -100,7 +91,7 @@ impl Slack {
         if on && self.voice.guide.is_none() && !self.voice.busy() {
             self.learn_my_style(host);
         }
-        self.refresh_voice_bar(host);
+        self.refresh_voice_settings(host);
     }
 
     /// Fetches the user's recent messages to (re)learn their style.
@@ -115,12 +106,12 @@ impl Slack {
             limit: voice::SAMPLE_SIZE,
         }) {
             self.voice.status = "Sign in to Slack first.".to_string();
-            self.refresh_voice_bar(host);
+            self.refresh_voice_settings(host);
             return;
         }
         self.voice.learning = Learning::Fetching;
         self.voice.status = format!("Reading your last {} messages…", voice::SAMPLE_SIZE);
-        self.refresh_voice_bar(host);
+        self.refresh_voice_settings(host);
     }
 
     /// The worker's answer to [`Command::FetchMyMessages`].
@@ -153,7 +144,7 @@ impl Slack {
                 let count = messages.len();
                 self.voice.learning = Learning::Writing { run, count };
                 self.voice.status = format!("Learning your style from {count} messages…");
-                self.refresh_voice_bar(host);
+                self.refresh_voice_settings(host);
             }
             Err(error) => self.finish_learning(Err(error), host),
         }
@@ -203,22 +194,19 @@ impl Slack {
             }
             Err(error) => self.voice.status = error,
         }
-        self.refresh_voice_bar(host);
+        self.refresh_voice_settings(host);
     }
 
     fn save_write_as_me(&mut self, on: bool, host: &mut dyn Host) {
-        self.settings = SlackSettings {
+        let settings = SlackSettings {
             write_as_me: on,
             ..self.settings.clone()
         };
-        if let Err(error) = host.settings().set(&self.settings) {
-            eprintln!("meow: {error}");
-        }
+        self.save_settings(settings, host);
     }
 
-    fn refresh_voice_bar(&self, host: &mut dyn Host) {
-        if self.slack_visible(host) {
-            self.page().render_voice(&self.voice_bar_state());
-        }
+    /// Settings › Slack shows where learning is at.
+    fn refresh_voice_settings(&self, host: &mut dyn Host) {
+        host.settings_changed();
     }
 }
