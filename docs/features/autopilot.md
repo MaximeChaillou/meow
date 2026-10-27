@@ -52,6 +52,14 @@ on the page (it is off by default).
   every job from then on follows it, in the triage and in the work, along with
   `~/.config/meow/autopilot.md`. Actions already waiting are left as they are:
   reject the ones you don't want.
+- **Feedback on one job:** once a job ran (done or failed, with no approved
+  call next up), **Give feedback** on its card points the same box at it:
+  type what it should do instead ("rebase, don't merge", "answer in
+  English") and press Return or **Send**. Its calls still waiting are
+  rejected, and the job queues again: it resumes its Claude session in the
+  same worktree, told what you said and which calls were made, and holds
+  again what it still wants to do. What you said shows on the card. Esc or
+  **Cancel feedback** points the box back at every job.
 
 `×` removes a job and its worktree; **Open folder** shows the worktree in
 Finder. Jobs are saved in `~/Library/Application Support/Meow/autopilot.json`,

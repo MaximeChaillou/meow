@@ -267,8 +267,12 @@ impl Feature for Slack {
     }
 
     /// Esc closes Claude's panel, then goes back from a thread or a
-    /// conversation; on the list, the bubble closes.
+    /// conversation; on the list, the bubble closes. On the Autopilot page,
+    /// it stops the feedback field replying to a job.
     fn escape(&mut self, host: &mut dyn Host) -> bool {
+        if host.page_visible(autopilot_page::PAGE_ID) {
+            return self.stop_replying_to_autopilot();
+        }
         if !self.slack_visible(host) {
             return false;
         }

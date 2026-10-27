@@ -2,8 +2,9 @@
 //! first. Each card says who asked what, how the work went, and lists the
 //! actions that wait for the user (a push, a reply…) with Approve and Reject.
 //! A running job shows its last steps. Feedback typed at the bottom is kept
-//! and followed by every later job; below the jobs, the messages the triage
-//! last left alone say why.
+//! and followed by every later job, or, after "Give feedback" on a job that
+//! ran, sent to that job, which works again following it. Below the jobs,
+//! the messages the triage last left alone say why.
 
 use std::cell::RefCell;
 
@@ -12,7 +13,8 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSColor, NSEvent, NSScrollView, NSTextAlignment, NSTextField, NSView,
+    NSAutoresizingMaskOptions, NSButton, NSColor, NSEvent, NSScrollView, NSTextAlignment,
+    NSTextField, NSView,
 };
 use objc2_foundation::{NSAttributedString, NSPoint, NSRect, NSSize, NSString};
 
@@ -36,10 +38,13 @@ const BUTTON_GAP: f64 = 6.0;
 const FOLDER_WIDTH: f64 = 110.0;
 const TOGGLE_WIDTH: f64 = 110.0;
 const SAVE_WIDTH: f64 = 76.0;
+const REPLY_WIDTH: f64 = 130.0;
 const INDENT: f64 = 6.0;
 const ACTION_INSET: f64 = 14.0;
 const WAITING_BORDER: f64 = 2.0;
 const FEEDBACK_HINT: &str = "Feedback for Autopilot, e.g. \"open the PR, don't message on Slack\"";
+const SAVE_TIP: &str = "Every job from now on follows this feedback";
+const SEND_TIP: &str = "The job works again, following this; Esc gives feedback for every job";
 /// Longest a held call's details are shown.
 const MAX_DETAIL_CHARS: usize = 700;
 /// Held actions are named `job row * TAG_STRIDE + action index`.
@@ -64,6 +69,8 @@ pub enum AutopilotAction {
     Feedback,
     /// Forget the feedback at this index.
     RemoveFeedback(usize),
+    /// Give feedback to the job in this row, or stop to.
+    Reply(usize),
 }
 
 pub struct AutopilotPage {
@@ -71,6 +78,7 @@ pub struct AutopilotPage {
     scroll: Retained<NSScrollView>,
     list: Retained<FlippedView>,
     input: Retained<widgets::GrowingField>,
+    save: Retained<NSButton>,
     /// The targets of the list's controls, all drawn again with it.
     actions: ActionSink<AutopilotAction>,
     /// The targets of the feedback field and its button, kept for them.
@@ -117,9 +125,7 @@ impl AutopilotPage {
             &save_target,
             Target::selector(),
         );
-        save.setToolTip(Some(&NSString::from_str(
-            "Every job from now on follows this feedback",
-        )));
+        save.setToolTip(Some(&NSString::from_str(SAVE_TIP)));
         let bottom = widgets::composer(
             mtm,
             &view,
@@ -153,6 +159,7 @@ impl AutopilotPage {
             scroll,
             list,
             input,
+            save,
             actions: fixed.sibling(),
             _fixed: fixed,
             shown_ids: RefCell::new(Vec::new()),
@@ -178,8 +185,24 @@ impl AutopilotPage {
         text
     }
 
-    /// Draws the switch, the feedback kept, the jobs, then the messages left alone.
-    pub fn render(&self, jobs: &Jobs, enabled: bool, feedback: &[String], now: u64) {
+    /// Puts the cursor in the feedback field.
+    pub fn focus_feedback(&self) {
+        if let Some(window) = self.input.window() {
+            window.makeFirstResponder(Some(&self.input));
+        }
+    }
+
+    /// Draws the switch, the feedback kept, the jobs, then the messages left
+    /// alone; the feedback field speaks to `replying`, else to every job.
+    pub fn render(
+        &self,
+        jobs: &Jobs,
+        enabled: bool,
+        feedback: &[String],
+        replying: Option<&Job>,
+        now: u64,
+    ) {
+        self.show_target(replying);
         let width = self.scroll.contentSize().width;
         for row in self.list.subviews().iter() {
             row.removeFromSuperview();
@@ -189,13 +212,32 @@ impl AutopilotPage {
         y = self.add_feedback(feedback, width, y);
         let mut ids = Vec::new();
         for job in jobs.all() {
-            y = self.add_job(ids.len(), job, width, y, now) + CARD_GAP;
+            let replied = replying.is_some_and(|r| r.id == job.id);
+            y = self.add_job(ids.len(), job, replied, width, y, now) + CARD_GAP;
             ids.push(job.id);
         }
         y = self.add_left_alone(jobs.left_alone(), width, y, now);
         let height = y.max(self.scroll.contentSize().height);
         self.list.setFrameSize(NSSize::new(width, height));
         self.shown_ids.replace(ids);
+    }
+
+    /// The feedback field's hint and button, for `replying` or for every job.
+    fn show_target(&self, replying: Option<&Job>) {
+        let (hint, label, tip) = match replying {
+            Some(job) => (
+                format!(
+                    "What should \"{}\" do instead? (Esc: for every job)",
+                    clip(&job.title, 60)
+                ),
+                "Send",
+                SEND_TIP,
+            ),
+            None => (FEEDBACK_HINT.to_string(), "Save", SAVE_TIP),
+        };
+        widgets::set_placeholder(&self.input, &hint);
+        widgets::set_text_button_label(&self.save, label, widgets::ButtonStyle::Accent);
+        self.save.setToolTip(Some(&NSString::from_str(tip)));
     }
 
     /// What Autopilot does, and the button turning it on or off. Returns the y below.
@@ -324,9 +366,11 @@ impl AutopilotPage {
         top + CARD_GAP
     }
 
-    /// A card: title, status and ×; who asked what; the work's last steps
-    /// while it runs, else its summary; then each held action. Returns the y below.
-    fn add_job(&self, row: usize, job: &Job, width: f64, y: f64, now: u64) -> f64 {
+    /// A card: title, status and ×; who asked what; the feedback it was
+    /// given; the work's last steps while it runs, else its summary; each
+    /// held action; then the button giving it feedback once it ran.
+    /// `replied` when the feedback field speaks to it. Returns the y below.
+    fn add_job(&self, row: usize, job: &Job, replied: bool, width: f64, y: f64, now: u64) -> f64 {
         let card = FlippedView::new(self.mtm, rect(0.0, y, width, 0.0));
         card.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
         self.list.addSubview(&card);
@@ -402,6 +446,16 @@ impl AutopilotPage {
             top += ROW_HEIGHT + LINE_GAP;
         }
 
+        let yours = Attributes::plain(theme::highlight(), theme::font(theme::SMALL_SIZE));
+        for feedback in &job.feedback {
+            top += self.add_wrapped(
+                &rich_text::attributed(&format!("You: {feedback}"), &yours),
+                2.0 * INDENT,
+                top,
+                inner,
+            ) + LINE_GAP;
+        }
+
         if job.stage == Stage::Working {
             let faint = Attributes::plain(theme::faint(), theme::font(theme::SMALL_SIZE));
             for step in &job.steps {
@@ -436,6 +490,34 @@ impl AutopilotPage {
             top = self.add_action(row * TAG_STRIDE + index, action, width, top) + LINE_GAP;
         }
 
+        if job.takes_feedback() {
+            let (label, tip) = if replied {
+                ("Cancel feedback", "Feedback goes to every job again")
+            } else {
+                (
+                    "Give feedback",
+                    "Tell this job what to do instead; it works again",
+                )
+            };
+            let reply = widgets::text_button(
+                self.mtm,
+                label,
+                widgets::ButtonStyle::Link,
+                &self.actions.target(AutopilotAction::Reply(row)),
+                Target::selector(),
+            );
+            reply.setToolTip(Some(&NSString::from_str(tip)));
+            reply.setFrame(rect(
+                width - 2.0 * INDENT - REPLY_WIDTH,
+                top,
+                REPLY_WIDTH,
+                ROW_HEIGHT,
+            ));
+            reply.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+            self.list.addSubview(&reply);
+            top += ROW_HEIGHT + LINE_GAP;
+        }
+
         let height = top - y + CARD_PADDING - LINE_GAP;
         card.setFrameSize(NSSize::new(width, height));
         let fill = if job.is_open() {
@@ -443,7 +525,7 @@ impl AutopilotPage {
         } else {
             theme::card_done()
         };
-        let border = (job.pending() > 0).then(theme::accent);
+        let border = (replied || job.pending() > 0).then(theme::accent);
         widgets::paint(
             &card,
             Some(&fill),
