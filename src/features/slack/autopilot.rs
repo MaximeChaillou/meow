@@ -68,6 +68,8 @@ pub(super) struct AutopilotState {
     next_poll: Instant,
     /// The running work took steps the page doesn't show yet.
     redraw: bool,
+    /// The job the feedback field speaks to, else every job.
+    pub(super) replying: Option<u64>,
 }
 
 impl AutopilotState {
@@ -82,6 +84,7 @@ impl AutopilotState {
             active: None,
             next_poll: Instant::now(),
             redraw: false,
+            replying: None,
         };
         let Some(path) = autopilot::default_path() else {
             return (state(Jobs::default(), None), None);
@@ -111,6 +114,7 @@ impl AutopilotState {
             active: None,
             next_poll: Instant::now(),
             redraw: false,
+            replying: None,
         }
     }
 
@@ -129,12 +133,59 @@ impl Slack {
             AutopilotAction::Reject(tag) => self.decide_autopilot(tag, false, host),
             AutopilotAction::Dismiss(row) => self.dismiss_autopilot(row, host),
             AutopilotAction::OpenFolder(row) => self.open_autopilot_folder(row),
+            AutopilotAction::Reply(row) => {
+                if let Some(id) = self.autopilot_page().id_at(row) {
+                    self.reply_to_autopilot(id);
+                }
+                if self.autopilot.replying.is_some() {
+                    self.autopilot_page().focus_feedback();
+                }
+                self.render_autopilot(host);
+            }
             AutopilotAction::Feedback => {
                 let text = self.autopilot_page().take_feedback();
-                self.add_autopilot_feedback(&text, host);
+                self.send_autopilot_feedback(&text, host);
             }
             AutopilotAction::RemoveFeedback(index) => self.remove_autopilot_feedback(index, host),
         }
+    }
+
+    /// The feedback field speaks to job `id` from now on, if it ran; to
+    /// every job again when it already did.
+    pub(super) fn reply_to_autopilot(&mut self, id: u64) {
+        let takes = self
+            .autopilot
+            .jobs
+            .get(id)
+            .is_some_and(|job| job.takes_feedback());
+        self.autopilot.replying = (takes && self.autopilot.replying != Some(id)).then_some(id);
+    }
+
+    /// The feedback field speaks to every job again. Returns whether it spoke to one.
+    pub(super) fn stop_replying_to_autopilot(&mut self) -> bool {
+        let replied = self.autopilot.replying.take().is_some();
+        self.autopilot_dirty |= replied;
+        replied
+    }
+
+    /// `text` typed in the feedback field: for the job replied to, which
+    /// works again following it, else for every job from now on.
+    pub(super) fn send_autopilot_feedback(&mut self, text: &str, host: &mut dyn Host) {
+        // The page shows a job that no longer takes feedback as every job's field.
+        let jobs = &self.autopilot.jobs;
+        let replying = self
+            .autopilot
+            .replying
+            .filter(|id| jobs.get(*id).is_some_and(|job| job.takes_feedback()));
+        let Some(id) = replying else {
+            self.autopilot.replying = None;
+            return self.add_autopilot_feedback(text, host);
+        };
+        if self.autopilot.jobs.follow_up(id, text) {
+            self.autopilot.replying = None;
+            self.save_autopilot();
+        }
+        self.autopilot_dirty = true;
     }
 
     /// Remembers `text` for every job from now on.
@@ -467,14 +518,23 @@ impl Slack {
             .ok()
             .filter(|m| !m.trim().is_empty())
             .unwrap_or_else(|| job.model().to_string());
-        let prompt = autopilot::work_prompt(&job, &self.me(), self.autopilot_rules().as_deref());
-        match Run::start_guarded(env, &prompt, None, &model, &cwd, &held, None) {
+        // Feedback on what a run did resumes its session; else the work starts over.
+        let resumed = job
+            .session
+            .as_deref()
+            .zip(autopilot::follow_up_prompt(&job, &self.me()));
+        let prompt = match &resumed {
+            Some((_, prompt)) => prompt.clone(),
+            None => autopilot::work_prompt(&job, &self.me(), self.autopilot_rules().as_deref()),
+        };
+        let session = resumed.map(|(session, _)| session);
+        match Run::start_guarded(env, &prompt, session, &model, &cwd, &held, None) {
             Ok(run) => {
                 self.autopilot.active = Some(Active {
                     run,
                     job: id,
                     step: Step::Work,
-                    session: None,
+                    session: session.map(str::to_string),
                 });
                 if let Some(job) = self.autopilot.jobs.get_mut(id) {
                     job.stage = Stage::Working;
@@ -725,6 +785,9 @@ impl Slack {
         {
             self.autopilot.preparing = None;
         }
+        if self.autopilot.replying == Some(id) {
+            self.autopilot.replying = None;
+        }
         if let Some(job) = self.autopilot.jobs.remove(id) {
             remove_folders(vec![job]);
         }
@@ -743,22 +806,33 @@ impl Slack {
     }
 
     fn autopilot_changed(&mut self, host: &mut dyn Host) {
+        self.save_autopilot();
+        self.render_autopilot(host);
+    }
+
+    /// Forgets old jobs, and saves the others.
+    fn save_autopilot(&mut self) {
         remove_folders(self.autopilot.jobs.prune(now_secs()));
         if let Some(path) = &self.autopilot.path
             && let Err(error) = self.autopilot.jobs.save(path)
         {
             eprintln!("meow: {error}");
         }
-        self.render_autopilot(host);
     }
 
     /// Redraws the Autopilot page, and the count of jobs waiting in the sidebar.
     pub(super) fn render_autopilot(&self, host: &mut dyn Host) {
         let jobs = &self.autopilot.jobs;
+        let replying = self
+            .autopilot
+            .replying
+            .and_then(|id| jobs.get(id))
+            .filter(|job| job.takes_feedback());
         self.autopilot_page().render(
             jobs,
             self.settings.autopilot,
             &self.settings.autopilot_feedback,
+            replying,
             now_secs(),
         );
         host.set_badge(autopilot_page::PAGE_ID, jobs.waiting_count());

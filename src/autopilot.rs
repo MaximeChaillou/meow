@@ -180,6 +180,17 @@ pub struct Job {
     /// The model the work last ran on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ran_on: Option<String>,
+    /// What the user told this job to do instead after it ran, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feedback: Vec<String>,
+    /// Where the latest run's actions start: calls held before it (a push
+    /// already made, a reply replaced by feedback) are not matched against.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub round_start: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 impl Job {
@@ -202,6 +213,16 @@ impl Job {
                 ActionState::Pending | ActionState::Approved | ActionState::Running
             )
         })
+    }
+
+    /// Whether the user can tell it to do the work differently: it ran, and
+    /// no approved call is next up or being made.
+    pub fn takes_feedback(&self) -> bool {
+        matches!(self.stage, Stage::Finished | Stage::Failed)
+            && !self
+                .actions
+                .iter()
+                .any(|a| matches!(a.state, ActionState::Approved | ActionState::Running))
     }
 
     /// Whether a worktree is still to be made before the work starts.
@@ -305,6 +326,8 @@ impl Jobs {
             finished_at: None,
             steps: Vec::new(),
             ran_on: None,
+            feedback: Vec::new(),
+            round_start: 0,
         };
         self.jobs.insert(0, job);
         &self.jobs[0]
@@ -355,7 +378,8 @@ impl Jobs {
         };
         let before = job.actions.len();
         for call in held {
-            if !job.actions.iter().any(|a| a.call.same_as(&call)) {
+            let start = job.round_start.min(job.actions.len());
+            if !job.actions[start..].iter().any(|a| a.call.same_as(&call)) {
                 job.actions.push(Action {
                     call,
                     state: ActionState::Pending,
@@ -382,6 +406,31 @@ impl Jobs {
         }
     }
 
+    /// The user's `text` on what job `id` did: it is queued to work again
+    /// following it, and its calls still waiting are rejected (the new run
+    /// holds again what it still wants to do). Returns whether it was taken:
+    /// not when blank, or when the job doesn't take feedback now.
+    pub fn follow_up(&mut self, id: u64, text: &str) -> bool {
+        let text = one_line(text, MAX_FEEDBACK_CHARS);
+        let Some(job) = self.get_mut(id).filter(|j| j.takes_feedback()) else {
+            return false;
+        };
+        if text.is_empty() {
+            return false;
+        }
+        for action in &mut job.actions {
+            if action.state == ActionState::Pending {
+                action.state = ActionState::Rejected;
+                action.result = Some("Replaced by your feedback".to_string());
+            }
+        }
+        job.feedback.push(text);
+        job.round_start = job.actions.len();
+        job.stage = Stage::Queued;
+        job.finished_at = None;
+        true
+    }
+
     pub fn remove(&mut self, id: u64) -> Option<Job> {
         let index = self.jobs.iter().position(|j| j.id == id)?;
         Some(self.jobs.remove(index))
@@ -403,14 +452,14 @@ impl Jobs {
         gone
     }
 
-    /// Jobs a restart interrupted start again from the beginning, forgetting
-    /// the calls their run held (its session is gone; the new run holds them
-    /// again), and actions that were being made wait for the user again.
+    /// Jobs a restart interrupted start their run again, forgetting the
+    /// calls it held (the new run holds them again), and actions that were
+    /// being made wait for the user again.
     pub fn after_restart(&mut self) {
         for job in &mut self.jobs {
             if matches!(job.stage, Stage::Preparing | Stage::Working) {
                 job.stage = Stage::Queued;
-                job.actions.clear();
+                job.actions.truncate(job.round_start);
             }
             for action in &mut job.actions {
                 if action.state == ActionState::Running {
@@ -474,8 +523,7 @@ pub fn user_rules() -> Option<String> {
 /// `feedback` with `text` added at the end, on one line: unchanged when
 /// `text` is blank or already there.
 pub fn add_feedback(feedback: &[String], text: &str) -> Vec<String> {
-    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let line = clip(&line, MAX_FEEDBACK_CHARS);
+    let line = one_line(text, MAX_FEEDBACK_CHARS);
     let mut all = feedback.to_vec();
     if !line.is_empty() && !feedback.contains(&line) {
         all.push(line);
@@ -593,8 +641,17 @@ above:\n{r}"
             )
         })
         .unwrap_or_default();
+    let feedback = if job.feedback.is_empty() {
+        String::new()
+    } else {
+        let lines: Vec<String> = job.feedback.iter().map(|f| format!("- {f}")).collect();
+        format!(
+            "\n\n{me}'s feedback on an earlier try of this work:\n{}",
+            lines.join("\n")
+        )
+    };
     format!(
-        "{prompt}{place}\n\n---\n\
+        "{prompt}{feedback}{place}\n\n---\n\
 You work for {me}, who is busy: nobody watches this session, so make reasonable choices instead \
 of asking, and finish the work. The request came from {from} on Slack: \"{text}\".\n\n\
 Do everything that can be taken back yourself: read, search, edit files here, build, test, \
@@ -648,6 +705,39 @@ fn reply_args(origin: &Origin) -> String {
         None if channel.starts_with('D') => format!("channel `{channel}`"),
         None => format!("channel `{channel}`, thread_ts `{}`", origin.ts),
     }
+}
+
+/// What resumes the session once the user gave feedback on what it did:
+/// the latest feedback, and which held calls were made. `None` without feedback.
+pub fn follow_up_prompt(job: &Job, me: &str) -> Option<String> {
+    let text = job.feedback.last()?;
+    let calls: Vec<String> = job.actions[..job.round_start.min(job.actions.len())]
+        .iter()
+        .map(|action| {
+            let made = match action.state {
+                ActionState::Done => "made",
+                _ => "not made",
+            };
+            format!("- {}: {made}", describe(&action.call).0)
+        })
+        .collect();
+    let calls = if calls.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nThe calls held so far:\n{}\nThe ones not made will not be: hold again those \
+still needed.",
+            calls.join("\n")
+        )
+    };
+    Some(format!(
+        "{me} read what you did and wants it done differently: \"{text}\"\n\n\
+Do the work again following this, here, with the same rules: everything that can be taken back \
+yourself, and every action that cannot be undone made as usual, to be held for {me}'s approval.\
+{calls}\n\n\
+End with a short summary for {me}, in the language of the request: what you did, and what is \
+waiting for approval."
+    ))
 }
 
 /// What resumes the session once the user approved `call`.
@@ -736,6 +826,11 @@ fn clip(text: &str, max: usize) -> String {
     let mut clipped: String = text.chars().take(max).collect();
     clipped.push('…');
     clipped
+}
+
+/// `text` on one line, clipped to `max`.
+fn one_line(text: &str, max: usize) -> String {
+    clip(&text.split_whitespace().collect::<Vec<_>>().join(" "), max)
 }
 
 #[cfg(test)]
@@ -1103,6 +1198,127 @@ mod tests {
             "{prompt}"
         );
         assert!(prompt.contains("- Only the PR, no Slack message\n\nEnd with a short summary"));
+    }
+
+    /// Job `id` of `jobs`, finished with a push and a reply waiting.
+    fn finished_with_two_waiting(jobs: &mut Jobs) -> u64 {
+        let id = jobs.add(plan(), origin("1"), 0).id;
+        let reply = Call {
+            tool: context::tool_name(context::SLACK_SEND),
+            input: json!({ "channel": "D1", "text": "C'est fait" }),
+        };
+        jobs.finish(id, Ok("Merged main".into()), vec![push(), reply], 1);
+        jobs.get_mut(id).unwrap().session = Some("s1".into());
+        id
+    }
+
+    #[test]
+    fn feedback_on_a_finished_job_queues_it_again_instead_of_what_waits() {
+        let mut jobs = Jobs::default();
+        let id = finished_with_two_waiting(&mut jobs);
+        jobs.set_action(id, 0, ActionState::Done, Some("pushed".into()));
+        assert!(jobs.get(id).unwrap().takes_feedback());
+
+        assert!(
+            !jobs.follow_up(id, "  \n "),
+            "blank feedback is no feedback"
+        );
+        assert!(jobs.follow_up(id, "Don't reply on Slack,\n  open the PR only"));
+        let job = jobs.get(id).unwrap();
+        assert_eq!(job.feedback, ["Don't reply on Slack, open the PR only"]);
+        assert_eq!(job.stage, Stage::Queued);
+        assert_eq!(job.finished_at, None);
+        assert_eq!(job.actions[0].state, ActionState::Done, "made, so kept");
+        assert_eq!(job.actions[1].state, ActionState::Rejected);
+        assert_eq!(
+            job.actions[1].result.as_deref(),
+            Some("Replaced by your feedback")
+        );
+        assert_eq!(jobs.waiting_count(), 0);
+        assert_eq!(jobs.next_queued().map(|j| j.id), Some(id));
+        assert!(!jobs.get(id).unwrap().takes_feedback(), "already queued");
+        assert!(!jobs.follow_up(id, "again"));
+    }
+
+    #[test]
+    fn only_jobs_that_ran_and_make_nothing_take_feedback() {
+        let mut jobs = Jobs::default();
+        let id = finished_with_two_waiting(&mut jobs);
+        jobs.set_action(id, 0, ActionState::Approved, None);
+        assert!(!jobs.get(id).unwrap().takes_feedback(), "a call is next up");
+        jobs.set_action(id, 0, ActionState::Running, None);
+        assert!(!jobs.follow_up(id, "stop"), "a call is being made");
+
+        let failed = jobs.add(plan(), origin("2"), 0).id;
+        assert!(!jobs.get(failed).unwrap().takes_feedback(), "not run yet");
+        jobs.finish(failed, Err("no clone".into()), Vec::new(), 1);
+        assert!(jobs.follow_up(failed, "The repository is o/r"));
+        assert!(!jobs.follow_up(99, "no such job"));
+    }
+
+    #[test]
+    fn calls_held_again_after_feedback_wait_again() {
+        let mut jobs = Jobs::default();
+        let id = finished_with_two_waiting(&mut jobs);
+        jobs.set_action(id, 0, ActionState::Done, None);
+        jobs.follow_up(id, "Squash the commits first");
+        jobs.get_mut(id).unwrap().stage = Stage::Working;
+        assert!(
+            jobs.hold(id, vec![push()]),
+            "the same push, after new commits"
+        );
+        assert!(!jobs.hold(id, vec![push()]), "held once per run");
+        let job = jobs.get(id).unwrap();
+        assert_eq!(job.actions.len(), 3);
+        assert_eq!(job.pending(), 1);
+    }
+
+    #[test]
+    fn a_restart_during_feedback_work_keeps_what_came_before() {
+        let mut jobs = Jobs::default();
+        let id = finished_with_two_waiting(&mut jobs);
+        jobs.follow_up(id, "Squash the commits first");
+        jobs.get_mut(id).unwrap().stage = Stage::Working;
+        jobs.hold(id, vec![push()]);
+        jobs.after_restart();
+        let job = jobs.get(id).unwrap();
+        assert_eq!(job.stage, Stage::Queued);
+        assert_eq!(job.actions.len(), 2, "only this run's calls are forgotten");
+        assert!(
+            follow_up_prompt(job, "Axel").is_some(),
+            "it resumes the session"
+        );
+    }
+
+    #[test]
+    fn feedback_resumes_the_session_with_what_was_and_wasnt_made() {
+        let mut jobs = Jobs::default();
+        let id = finished_with_two_waiting(&mut jobs);
+        assert_eq!(follow_up_prompt(jobs.get(id).unwrap(), "Axel"), None);
+        jobs.set_action(id, 0, ActionState::Done, None);
+        jobs.follow_up(id, "Answer in English");
+        let prompt = follow_up_prompt(jobs.get(id).unwrap(), "Axel").unwrap();
+        assert!(prompt.contains("\"Answer in English\""), "{prompt}");
+        assert!(prompt.contains("- Push the fix: made"), "{prompt}");
+        let reply = &jobs.get(id).unwrap().actions[1].call;
+        let not_made = format!("- {}: not made", describe(reply).0);
+        assert!(prompt.contains(&not_made), "{prompt}");
+        assert!(prompt.contains("held for Axel's approval"), "{prompt}");
+        assert!(prompt.contains("End with a short summary"), "{prompt}");
+    }
+
+    #[test]
+    fn a_job_started_again_without_its_session_follows_its_feedback() {
+        let mut jobs = Jobs::default();
+        let id = jobs.add(plan(), origin("1"), 0).id;
+        jobs.finish(id, Err("Claude Code wasn't found".into()), Vec::new(), 1);
+        assert!(!work_prompt(jobs.get(id).unwrap(), "Axel", None).contains("feedback on"));
+        jobs.follow_up(id, "Look at the iOS build too");
+        let prompt = work_prompt(jobs.get(id).unwrap(), "Axel", None);
+        assert!(
+            prompt.contains("Axel's feedback on an earlier try of this work:\n- Look at the iOS"),
+            "{prompt}"
+        );
     }
 
     #[test]
