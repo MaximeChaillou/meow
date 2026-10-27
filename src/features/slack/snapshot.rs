@@ -112,9 +112,11 @@ fn sample_jobs() -> Jobs {
     );
     jobs.finish(
         1,
-        Ok("Merged `main` into `feat/window-size`: two conflicts in `src/ui/chat_window.rs`, \
+        Ok(
+            "Merged `main` into `feat/window-size`: two conflicts in `src/ui/chat_window.rs`, \
             kept both sizes. `cargo test` passes. The push and a reply to Axel wait for you."
-            .into()),
+                .into(),
+        ),
         vec![
             Call {
                 tool: "Bash".into(),
@@ -124,10 +126,10 @@ fn sample_jobs() -> Jobs {
                 }),
             },
             Call {
-                tool: "mcp__claude_ai_Slack__slack_send_message".into(),
+                tool: "mcp__meow__slack_send_message".into(),
                 input: serde_json::json!({
-                    "channel_id": "D1",
-                    "message": "C'est réglé, j'ai mergé main et poussé, tu peux relancer la review.",
+                    "channel": "D1",
+                    "text": "C'est réglé, j'ai mergé main et poussé, tu peux relancer la review.",
                 }),
             },
         ],

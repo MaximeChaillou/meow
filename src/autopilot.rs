@@ -12,6 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::claude::STRONG_MODEL;
+use crate::context;
 use crate::guard::Call;
 use crate::tasks::take_fence;
 
@@ -415,6 +416,9 @@ impl Jobs {
                 if action.state == ActionState::Running {
                     action.state = ActionState::Pending;
                 }
+                if let Some(call) = through_meow(&action.call) {
+                    action.call = call;
+                }
             }
         }
     }
@@ -599,13 +603,51 @@ a comment, changing a Linear issue or a pull request) is held by Meow for {me}'s
 the call exactly as you would if it were allowed, with its final content (for a reply, the \
 message itself, in {me}'s voice and the conversation's language), and it will wait for {me} \
 to approve it. Do not try to reach the same result another way. When a reply to {from} would \
-help, prepare it that way too.{rules}\n\n\
+help, prepare it that way too, with `{send}` ({reply_to}): Slack messages go through {me}'s own \
+Slack in Meow, never through another Slack tool.{rules}\n\n\
 End with a short summary for {me}, in the language of the request: what you did, and what is \
 waiting for approval.",
         prompt = job.plan_prompt,
+        send = context::tool_name(context::SLACK_SEND),
+        reply_to = reply_args(&job.origin),
         from = job.origin.from,
         text = clip(&job.origin.text, 600).replace('"', "'"),
     )
+}
+
+/// A Slack connector send held before Slack messages went through Meow, as
+/// Meow's own send: the connector's tools are no longer offered, so it could
+/// not be made once approved.
+fn through_meow(call: &Call) -> Option<Call> {
+    if call.tool != "mcp__claude_ai_Slack__slack_send_message" {
+        return None;
+    }
+    let input = &call.input;
+    let mut moved = serde_json::Map::new();
+    for (from, to) in [
+        ("channel_id", "channel"),
+        ("message", "text"),
+        ("thread_ts", "thread_ts"),
+    ] {
+        if let Some(value) = input.get(from) {
+            moved.insert(to.to_string(), value.clone());
+        }
+    }
+    Some(Call {
+        tool: context::tool_name(context::SLACK_SEND),
+        input: Value::Object(moved),
+    })
+}
+
+/// Where a reply to `origin` goes, as the send tool's arguments: its thread,
+/// else the DM itself, else a thread on the message (in a channel).
+fn reply_args(origin: &Origin) -> String {
+    let channel = &origin.channel;
+    match &origin.thread_ts {
+        Some(thread) => format!("channel `{channel}`, thread_ts `{thread}`"),
+        None if channel.starts_with('D') => format!("channel `{channel}`"),
+        None => format!("channel `{channel}`, thread_ts `{}`", origin.ts),
+    }
 }
 
 /// What resumes the session once the user approved `call`.
@@ -638,6 +680,11 @@ pub fn describe(call: &Call) -> (String, String) {
         .strip_prefix("mcp__")
         .and_then(|rest| rest.split("__").next())
         .map(|s| s.trim_start_matches("claude_ai_").replace('_', " "));
+    // Meow's own tools name their app first: `slack send message` is Slack's.
+    let server = match server {
+        Some(server) if server == context::SERVER_NAME => name.split(' ').next().map(capitalize),
+        other => other,
+    };
     let what = match server {
         // `Slack: slack send message` reads `Slack: send message`.
         Some(server) => {
@@ -672,6 +719,14 @@ pub fn describe(call: &Call) -> (String, String) {
         None => input.to_string(),
     };
     (what, detail)
+}
+
+fn capitalize(word: &str) -> String {
+    let mut chars = word.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 fn clip(text: &str, max: usize) -> String {
@@ -926,6 +981,45 @@ mod tests {
         assert!(prompt.contains("`git push fork HEAD:feat/x`"), "{prompt}");
         assert!(prompt.contains("merges into `main`"));
         assert!(prompt.contains("from Axel on Slack: \"Ta PR #12 a des conflits\""));
+        assert!(
+            prompt.contains("with `mcp__meow__slack_send_message` (channel `D1`)"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn connector_sends_held_before_go_through_meow_after_a_restart() {
+        let mut jobs = Jobs::default();
+        jobs.add(plan(), origin("1"), 0);
+        let old = Call {
+            tool: "mcp__claude_ai_Slack__slack_send_message".into(),
+            input: json!({ "channel_id": "D1", "message": "Fait", "thread_ts": "0.5" }),
+        };
+        jobs.finish(1, Ok("Done".into()), vec![old, push()], 0);
+        jobs.after_restart();
+        let actions = &jobs.get(1).unwrap().actions;
+        assert_eq!(actions[0].call.tool, "mcp__meow__slack_send_message");
+        assert_eq!(
+            actions[0].call.input,
+            json!({ "channel": "D1", "text": "Fait", "thread_ts": "0.5" })
+        );
+        assert_eq!(actions[1].call, push(), "other calls stay as they are");
+    }
+
+    #[test]
+    fn replies_go_in_the_thread_or_start_one_in_a_channel() {
+        let dm = origin("1.0");
+        assert_eq!(reply_args(&dm), "channel `D1`");
+        let in_thread = Origin {
+            thread_ts: Some("0.5".into()),
+            ..origin("1.0")
+        };
+        assert_eq!(reply_args(&in_thread), "channel `D1`, thread_ts `0.5`");
+        let mention = Origin {
+            channel: "C9".into(),
+            ..origin("1.0")
+        };
+        assert_eq!(reply_args(&mention), "channel `C9`, thread_ts `1.0`");
     }
 
     #[test]
@@ -938,12 +1032,17 @@ mod tests {
             )
         );
         let send = Call {
-            tool: "mcp__claude_ai_Slack__slack_send_message".into(),
-            input: json!({ "channel_id": "D1", "message": "C'est réglé, je push." }),
+            tool: "mcp__meow__slack_send_message".into(),
+            input: json!({ "channel": "D1", "text": "C'est réglé, je push." }),
         };
         let (what, detail) = describe(&send);
         assert_eq!(what, "Slack: send message");
-        assert_eq!(detail, "{\"channel_id\":\"D1\"}\nC'est réglé, je push.");
+        assert_eq!(detail, "{\"channel\":\"D1\"}\nC'est réglé, je push.");
+        let connector = Call {
+            tool: "mcp__claude_ai_Linear__save_comment".into(),
+            input: json!({ "issueId": "ACC-1", "body": "Fixed" }),
+        };
+        assert_eq!(describe(&connector).0, "Linear: save comment");
     }
 
     #[test]

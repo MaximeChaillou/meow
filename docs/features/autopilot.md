@@ -34,8 +34,11 @@ on the page (it is off by default).
   Anything else is held: pushing, `gh pr comment/merge/…`, POST requests,
   publishing or deploying, deleting outside the folder, and every connector
   tool that does more than read (sending a Slack message or an email, saving a
-  Linear issue…). The held call is recorded exactly as Claude made it, shows
-  on the job's card at once, and Claude carries on without it.
+  Linear issue…). A reply on Slack is prepared with Meow's own
+  `slack_send_message`, in the request's thread (or its DM), so it goes out
+  through your Slack session in Meow, not through the Slack connector. The
+  held call is recorded exactly as Claude made it, shows on the job's card at
+  once, and Claude carries on without it.
 - **Approval:** the job's card shows its summary and each held call (the
   command, or the message with where it goes) with **Approve** and **Reject**.
   An approved call is made once the work has ended: approving resumes the
