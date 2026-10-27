@@ -399,10 +399,11 @@ pub fn done_reply_prompt() -> String {
          (the Slack message or thread, the email, the issue) and who made it, then prepare a \
          short reply in my name saying it is done, with the useful detail (new time, link, \
          result), in the language of the conversation. Leave it as a draft where the request \
-         was made: a Slack draft in the same DM or thread (`slack_send_message_draft`, with \
-         `thread_ts` for a thread), or a Gmail draft in the same thread. Never send or post \
-         anything. If you cannot tell who asked or where, ask me instead of guessing. Then tell \
-         me in one line where the draft is."
+         was made: a Slack draft in the same DM or thread (`{draft}`, with `thread_ts` for a \
+         thread), or a Gmail draft in the same thread. Never send or post anything. If you \
+         cannot tell who asked or where, ask me instead of guessing. Then tell me in one line \
+         where the draft is.",
+        draft = crate::context::tool_name(crate::context::SLACK_DRAFT),
     )
 }
 
@@ -437,6 +438,14 @@ pub fn report_instruction() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn done_replies_are_drafted_through_meows_slack() {
+        let prompt = done_reply_prompt();
+        assert!(prompt.starts_with(DONE_REPLY_REQUEST));
+        assert!(prompt.contains("`mcp__meow__slack_draft`"), "{prompt}");
+        assert!(prompt.contains("Never send or post anything"));
+    }
 
     fn found(title: &str, source: &str, url: Option<&str>) -> FoundTask {
         FoundTask {

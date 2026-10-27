@@ -21,9 +21,11 @@ pub struct ToolSpec {
     pub description: &'static str,
     /// JSON Schema of its arguments.
     pub input_schema: Value,
+    /// Whether it only reads; otherwise it acts (e.g. sends a message).
+    pub read_only: bool,
 }
 
-/// What the server offers: its tools, all read-only.
+/// What the server offers: its tools.
 pub trait Toolbox {
     fn tools(&self) -> Vec<ToolSpec>;
     /// Runs tool `name`; the text is the result, or why it failed.
@@ -91,7 +93,7 @@ fn list(toolbox: &impl Toolbox) -> Vec<Value> {
                 "name": tool.name,
                 "description": tool.description,
                 "inputSchema": tool.input_schema,
-                "annotations": { "readOnlyHint": true },
+                "annotations": { "readOnlyHint": tool.read_only },
             })
         })
         .collect()
@@ -122,11 +124,20 @@ mod tests {
 
     impl Toolbox for Echo {
         fn tools(&self) -> Vec<ToolSpec> {
-            vec![ToolSpec {
-                name: "echo",
-                description: "Says it back",
-                input_schema: json!({ "type": "object" }),
-            }]
+            vec![
+                ToolSpec {
+                    name: "echo",
+                    description: "Says it back",
+                    input_schema: json!({ "type": "object" }),
+                    read_only: true,
+                },
+                ToolSpec {
+                    name: "shout",
+                    description: "Says it to everyone",
+                    input_schema: json!({ "type": "object" }),
+                    read_only: false,
+                },
+            ]
         }
 
         fn call(&self, name: &str, args: &Value) -> Result<String, String> {
@@ -164,12 +175,16 @@ mod tests {
     }
 
     #[test]
-    fn tools_are_listed_read_only() {
+    fn tools_are_listed_with_whether_they_only_read() {
         let r = reply(r#"{"jsonrpc":"2.0","id":"a","method":"tools/list"}"#);
         let tool = &r["result"]["tools"][0];
         assert_eq!(tool["name"], "echo");
         assert_eq!(tool["inputSchema"]["type"], "object");
         assert_eq!(tool["annotations"]["readOnlyHint"], true);
+        assert_eq!(
+            r["result"]["tools"][1]["annotations"]["readOnlyHint"],
+            false
+        );
     }
 
     #[test]

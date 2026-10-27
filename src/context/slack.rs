@@ -1,5 +1,6 @@
 //! The Slack tools of Meow's MCP server: the user's conversations, their
-//! history and threads, and search, through the session Meow signed in with.
+//! history and threads, and search, and sending a message or leaving it as a
+//! draft, through the session Meow signed in with.
 //!
 //! Names come from Meow's Slack cache; the session is only read from the
 //! Keychain once a tool needs Slack itself, so chats that never touch Slack
@@ -122,6 +123,57 @@ impl<H: Http> SlackTools<H> {
         Ok(lines.join("\n"))
     }
 
+    /// Sends a message as the user, in the thread `thread_ts` if given.
+    pub fn send(&self, args: &Value) -> Result<String, String> {
+        let (channel, text, thread_ts) = self.message_args(args)?;
+        self.api()?
+            .post_message(&channel, text, thread_ts)
+            .map_err(|e| e.to_string())?;
+        Ok(format!("Sent in {}.", self.place(&channel, thread_ts)))
+    }
+
+    /// Leaves a message as the user's draft, unsent, in the thread `thread_ts` if given.
+    pub fn draft(&self, args: &Value) -> Result<String, String> {
+        let (channel, text, thread_ts) = self.message_args(args)?;
+        self.api()?
+            .create_draft(&channel, text, thread_ts)
+            .map_err(|e| e.to_string())?;
+        Ok(format!(
+            "Saved as a draft in {}.",
+            self.place(&channel, thread_ts)
+        ))
+    }
+
+    /// Where a message goes, and what it says.
+    fn message_args<'a>(
+        &self,
+        args: &'a Value,
+    ) -> Result<(String, &'a str, Option<&'a str>), String> {
+        let channel = self.resolve(str_arg(args, "channel")?)?;
+        let text = str_arg(args, "text")?;
+        let thread_ts = args
+            .get("thread_ts")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|ts| !ts.is_empty());
+        Ok((channel, text, thread_ts))
+    }
+
+    /// "DM with ana", "#eng" or the id, then the thread if any.
+    fn place(&self, channel: &str, thread_ts: Option<&str>) -> String {
+        let name = self
+            .cache
+            .channels
+            .iter()
+            .find(|c| c.id == channel)
+            .map(|c| conversation_label(c, &self.names()))
+            .unwrap_or_else(|| channel.to_string());
+        match thread_ts {
+            Some(ts) => format!("{name}, thread {ts}"),
+            None => name,
+        }
+    }
+
     /// A conversation id from an id, `#channel`, channel name or person's name.
     fn resolve(&self, wanted: &str) -> Result<String, String> {
         let wanted = wanted.trim().trim_start_matches(['#', '@']);
@@ -197,8 +249,9 @@ fn looks_like_id(text: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
-fn conversation_line(channel: &Channel, names: &NameMap) -> String {
-    let label = match channel.kind {
+/// "DM with ana", "group DM …", "#eng".
+fn conversation_label(channel: &Channel, names: &NameMap) -> String {
+    match channel.kind {
         ChannelKind::Im => {
             let person = channel.user.as_deref().unwrap_or("someone");
             let person = names.users.get(person).map_or(person, String::as_str);
@@ -206,7 +259,11 @@ fn conversation_line(channel: &Channel, names: &NameMap) -> String {
         }
         ChannelKind::Mpim => format!("group DM {}", channel.name),
         ChannelKind::Channel => format!("#{}", channel.name),
-    };
+    }
+}
+
+fn conversation_line(channel: &Channel, names: &NameMap) -> String {
+    let label = conversation_label(channel, names);
     let mut flags = Vec::new();
     if channel.unread {
         flags.push("unread".to_string());
@@ -426,6 +483,55 @@ mod tests {
             text.ends_with("ana in #eng: ship it (channel C0000ENG1, ts 5.0, https://x/p)"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn send_posts_as_the_user_and_says_where() {
+        let (tools, http) = tools(&[r#"{"ok":true}"#, r#"{"ok":true}"#]);
+        let sent = tools
+            .send(&json!({ "channel": "ana", "text": "C'est fait" }))
+            .unwrap();
+        assert_eq!(sent, "Sent in DM with ana.");
+        let in_thread = tools
+            .send(&json!({ "channel": "C0000ENG1", "text": "ok", "thread_ts": "4.0" }))
+            .unwrap();
+        assert_eq!(in_thread, "Sent in #eng, thread 4.0.");
+        assert_eq!(
+            *http.methods.borrow(),
+            ["chat.postMessage", "chat.postMessage"]
+        );
+    }
+
+    #[test]
+    fn draft_leaves_the_message_unsent() {
+        let (tools, http) = tools(&[r#"{"ok":true,"draft":{"id":"Dr1"}}"#]);
+        let saved = tools
+            .draft(&json!({ "channel": "#eng", "text": "Done", "thread_ts": "4.0" }))
+            .unwrap();
+        assert_eq!(saved, "Saved as a draft in #eng, thread 4.0.");
+        assert_eq!(*http.methods.borrow(), ["drafts.create"]);
+    }
+
+    #[test]
+    fn messages_need_a_place_and_a_text() {
+        let (tools, http) = tools(&[]);
+        assert!(tools.send(&json!({ "channel": "eng" })).is_err());
+        assert!(tools.draft(&json!({ "text": "hi" })).is_err());
+        assert!(
+            tools
+                .send(&json!({ "channel": "random", "text": "hi" }))
+                .is_err()
+        );
+        assert!(http.methods.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_refused_send_is_reported() {
+        let (tools, _) = tools(&[r#"{"ok":false,"error":"channel_not_found"}"#]);
+        let err = tools
+            .send(&json!({ "channel": "eng", "text": "hi" }))
+            .unwrap_err();
+        assert!(err.contains("channel_not_found"), "{err}");
     }
 
     #[test]

@@ -6,6 +6,8 @@
 
 use std::collections::HashMap;
 
+use serde_json::json;
+
 use super::auth::Credentials;
 use super::http::Http;
 use super::model::{self, Activity, AuthTest, Channel, Message, Page, SearchHit, SlackError, User};
@@ -260,6 +262,41 @@ impl<H: Http> SlackApi<H> {
         model::parse_ok(&body).map_err(ApiError::Slack)
     }
 
+    /// Saves `text` as the user's draft in `channel` (in the thread
+    /// `thread_ts`): their Slack apps show it in the composer, unsent. This is
+    /// the method Slack's own clients use; it takes only a session token.
+    pub fn create_draft(
+        &self,
+        channel: &str,
+        text: &str,
+        thread_ts: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let mut destination = json!({ "channel_id": channel });
+        if let Some(thread_ts) = thread_ts {
+            destination["thread_ts"] = json!(thread_ts);
+            destination["broadcast"] = json!(false);
+        }
+        let blocks = json!([{
+            "type": "rich_text",
+            "elements": [{
+                "type": "rich_text_section",
+                "elements": [{ "type": "text", "text": text }]
+            }]
+        }])
+        .to_string();
+        let destinations = json!([destination]).to_string();
+        let id = client_msg_id();
+        let params = [
+            ("blocks", blocks.as_str()),
+            ("destinations", destinations.as_str()),
+            ("client_msg_id", id.as_str()),
+            ("file_ids", "[]"),
+            ("is_from_composer", "true"),
+        ];
+        let body = self.call("drafts.create", &params)?;
+        model::parse_ok(&body).map_err(ApiError::Slack)
+    }
+
     /// Marks a conversation read up to `ts`, syncing with the user's other Slack apps.
     pub fn mark(&self, channel: &str, ts: &str) -> Result<(), ApiError> {
         let body = self.call("conversations.mark", &[("channel", channel), ("ts", ts)])?;
@@ -282,6 +319,24 @@ impl<H: Http> SlackApi<H> {
             Err(ApiError::Http(response.status))
         }
     }
+}
+
+/// A random (version 4) UUID, which Slack's clients send with each draft.
+fn client_msg_id() -> String {
+    let mut bytes = [0u8; 16];
+    // SAFETY: arc4random_buf writes exactly `bytes.len()` bytes into the buffer.
+    unsafe { libc::arc4random_buf(bytes.as_mut_ptr().cast(), bytes.len()) };
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
 }
 
 #[cfg(test)]
@@ -495,6 +550,51 @@ mod tests {
         api.post_message("D1", "hello", None).unwrap();
         let call = api.http.last();
         assert!(!call.params.iter().any(|(k, _)| k == "thread_ts"));
+    }
+
+    #[test]
+    fn create_draft_addresses_the_thread_with_the_text_as_blocks() {
+        let api = api(FakeHttp::with(&[r#"{"ok":true,"draft":{"id":"Dr1"}}"#]));
+        api.create_draft("D1", "C'est fait", Some("1.0")).unwrap();
+        let call = api.http.last();
+        assert_eq!(call.url, "https://acme.slack.com/api/drafts.create");
+        let param = |key: &str| {
+            let found = call.params.iter().find(|(k, _)| k == key);
+            found.map(|(_, v)| v.clone()).unwrap_or_default()
+        };
+        let destinations: serde_json::Value = serde_json::from_str(&param("destinations")).unwrap();
+        assert_eq!(
+            destinations,
+            json!([{ "channel_id": "D1", "thread_ts": "1.0", "broadcast": false }])
+        );
+        let blocks: serde_json::Value = serde_json::from_str(&param("blocks")).unwrap();
+        assert_eq!(
+            blocks[0]["elements"][0]["elements"][0],
+            json!({ "type": "text", "text": "C'est fait" })
+        );
+        assert_eq!(param("client_msg_id").len(), 36);
+        assert_eq!(param("file_ids"), "[]");
+    }
+
+    #[test]
+    fn create_draft_outside_a_thread_names_the_channel_only() {
+        let api = api(FakeHttp::with(&[r#"{"ok":true}"#]));
+        api.create_draft("C1", "hi", None).unwrap();
+        let call = api.http.last();
+        let destinations = call.params.iter().find(|(k, _)| k == "destinations");
+        assert_eq!(destinations.unwrap().1, r#"[{"channel_id":"C1"}]"#);
+    }
+
+    #[test]
+    fn client_msg_ids_are_fresh_v4_uuids() {
+        let (a, b) = (client_msg_id(), client_msg_id());
+        assert_ne!(a, b);
+        let parts: Vec<&str> = a.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            [8, 4, 4, 4, 12]
+        );
+        assert!(parts[2].starts_with('4'), "{a}");
     }
 
     #[test]

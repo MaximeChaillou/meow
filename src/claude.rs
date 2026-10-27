@@ -273,7 +273,7 @@ const SUPERSET_HOME_VAR: &str = "SUPERSET_HOME_DIR";
 
 impl Run {
     pub fn start(env: &ClaudeEnv, prompt: &str, session: Option<&str>) -> Result<Self, String> {
-        let args = app_context_args(env);
+        let args = app_context_args(env, true);
         Self::spawn(
             env,
             prompt,
@@ -299,7 +299,7 @@ impl Run {
     /// A one-off call with the user's tools, skills and connectors, read-only:
     /// Claude can look things up but not change or send anything.
     pub fn start_read_only(env: &ClaudeEnv, prompt: &str, model: &str) -> Result<Self, String> {
-        let args = app_context_args(env);
+        let args = app_context_args(env, false);
         Self::spawn(
             env,
             prompt,
@@ -318,7 +318,7 @@ impl Run {
         prompt: &str,
         session: Option<&str>,
     ) -> Result<Self, String> {
-        let args = app_context_args(env);
+        let args = app_context_args(env, false);
         Self::spawn(
             env,
             prompt,
@@ -379,7 +379,7 @@ impl Run {
             .meow_bin
             .as_deref()
             .ok_or("Meow could not find its own binary, which guards autopilot runs.")?;
-        let mut args = app_context_args(env);
+        let mut args = app_context_args(env, true);
         args.extend(["--settings".to_string(), guard::settings(bin)]);
         let env = ClaudeEnv {
             cwd: cwd.to_path_buf(),
@@ -470,9 +470,11 @@ impl Drop for Run {
 }
 
 /// What tells Claude it runs inside Meow: the description of Meow appended to
-/// its system prompt, and Meow's read-only tools, alongside the user's own
-/// MCP servers. Only the prompt when Meow's binary is unknown.
-fn app_context_args(env: &ClaudeEnv) -> Vec<String> {
+/// its system prompt, and Meow's tools, alongside the user's own MCP servers.
+/// Slack messages then go through Meow's Slack session only: the Slack
+/// connector's tools that send are removed. Only the prompt when Meow's
+/// binary is unknown. A run that may not `act` gets only Meow's read tools.
+fn app_context_args(env: &ClaudeEnv, acts: bool) -> Vec<String> {
     let prompt = [
         "--append-system-prompt".to_string(),
         context::system_prompt(),
@@ -482,7 +484,9 @@ fn app_context_args(env: &ClaudeEnv) -> Vec<String> {
             "--mcp-config".to_string(),
             context::mcp_config(bin),
             "--allowedTools".to_string(),
-            context::allowed_tools(),
+            context::allowed_tools(acts),
+            "--disallowedTools".to_string(),
+            context::disallowed_tools(acts),
         ]
     });
     prompt
@@ -821,9 +825,24 @@ mod tests {
         let chat = args_of(Run::start(&env, "hi", None).unwrap());
         assert!(chat.contains("--append-system-prompt\nYou are the assistant built into Meow"));
         assert!(chat.contains("\"command\":\"/Apps/Meow/meow\""), "{chat}");
-        assert!(chat.contains("--allowedTools\nmcp__meow\n"), "{chat}");
+        assert!(
+            chat.contains("--allowedTools\nmcp__meow__slack_conversations,"),
+            "{chat}"
+        );
+        assert!(
+            chat.contains("--disallowedTools\nmcp__claude_ai_Slack__"),
+            "{chat}"
+        );
+        let guarded = args_of(
+            Run::start_guarded(&env, "hi", None, "opus", &dir, &dir.join("held"), None).unwrap(),
+        );
+        assert!(guarded.contains("--disallowedTools"), "{guarded}");
         let planning = args_of(Run::start_planning(&env, "hi", None).unwrap());
         assert!(planning.contains("--mcp-config"), "{planning}");
+        assert!(
+            planning.contains(",mcp__meow__slack_send_message,mcp__meow__slack_draft\n"),
+            "{planning}"
+        );
         let offline = args_of(Run::start_offline(&env, "hi").unwrap());
         assert!(!offline.contains("--mcp-config"), "{offline}");
         assert!(!offline.contains("--append-system-prompt"), "{offline}");
@@ -839,7 +858,7 @@ mod tests {
             model: DEFAULT_MODEL.into(),
             meow_bin: None,
         };
-        let args = app_context_args(&env);
+        let args = app_context_args(&env, true);
         assert_eq!(args.len(), 2);
         assert_eq!(args[0], "--append-system-prompt");
     }

@@ -113,8 +113,14 @@ pub fn decide(call: &Call, cwd: &Path) -> Decision {
         let Some((server, name)) = rest.split_once("__") else {
             return Decision::Hold;
         };
-        // Meow's own tools only read.
-        if server == crate::context::SERVER_NAME || mcp_only_reads(name) {
+        // Meow's own tools say whether they only read; sending a Slack message
+        // through them is held like any other.
+        let reads = if server == crate::context::SERVER_NAME {
+            crate::context::only_reads(name)
+        } else {
+            mcp_only_reads(name)
+        };
+        if reads {
             return Decision::Allow;
         }
     }
@@ -281,6 +287,11 @@ fn segment_is_irreversible(words: &[String], cwd: &Path) -> bool {
         args.iter()
             .any(|a| a == flag || a.starts_with(&format!("{flag}=")))
     };
+    // Meow's MCP server sends on Slack: only Claude may start it, so its
+    // calls go through this guard.
+    if program == "meow" || has(crate::context::MCP_FLAG) || has(GUARD_FLAG) {
+        return true;
+    }
     match program {
         "git" => {
             let sub = git_subcommand(args);
@@ -596,6 +607,9 @@ mod tests {
             "rm ../other/file",
             "gcloud run deploy api",
             "kubectl apply -f x.yaml",
+            "printf '{}' | /Applications/Meow.app/Contents/MacOS/meow --mcp",
+            "echo x | ./target/debug/meow",
+            "cargo run -- --mcp < calls.jsonl",
         ] {
             assert_eq!(bash(command), Decision::Hold, "{command}");
         }
@@ -637,6 +651,9 @@ mod tests {
         for name in [
             "mcp__claude_ai_Slack__slack_send_message",
             "mcp__claude_ai_Slack__slack_schedule_message",
+            "mcp__meow__slack_send_message",
+            "mcp__meow__slack_draft",
+            "mcp__meow__unknown",
             "mcp__claude_ai_Linear__save_issue",
             "mcp__claude_ai_Linear__save_comment",
             "mcp__claude_ai_Gmail__send_message",
@@ -669,8 +686,8 @@ mod tests {
         assert!(push.same_as(&other_description));
         assert!(!push.same_as(&force));
         let send = |text: &str| Call {
-            tool: "mcp__claude_ai_Slack__slack_send_message".into(),
-            input: json!({ "channel_id": "D1", "message": text }),
+            tool: "mcp__meow__slack_send_message".into(),
+            input: json!({ "channel": "D1", "text": text }),
         };
         assert!(send("hi").same_as(&send("hi")));
         assert!(!send("hi").same_as(&send("hi!")));

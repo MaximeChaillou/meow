@@ -36,9 +36,58 @@ pub fn mcp_config(exe: &Path) -> String {
     .to_string()
 }
 
-/// The permission rule allowing every tool of the server; all only read.
-pub fn allowed_tools() -> String {
-    format!("mcp__{SERVER_NAME}")
+/// The tool sending a Slack message as the user.
+pub const SLACK_SEND: &str = "slack_send_message";
+/// The tool leaving a Slack message as the user's draft, unsent.
+pub const SLACK_DRAFT: &str = "slack_draft";
+
+/// The Slack connector's tools that post or draft a message: Meow's own
+/// [`SLACK_SEND`] and [`SLACK_DRAFT`] take their place, so every message a
+/// Claude session sends goes through the Slack session Meow signed in with.
+const CONNECTOR_SLACK_WRITES: &[&str] = &[
+    "mcp__claude_ai_Slack__slack_schedule_message",
+    "mcp__claude_ai_Slack__slack_send_message",
+    "mcp__claude_ai_Slack__slack_send_message_draft",
+];
+
+/// The full name Claude calls the server's tool `name` by.
+pub fn tool_name(name: &str) -> String {
+    format!("mcp__{SERVER_NAME}__{name}")
+}
+
+/// The permission rules for the tools Claude may use without asking: those
+/// that only read and, in a run that may act, leaving a draft, which sends
+/// nothing. Sending a message goes through the session's permission mode
+/// (and Autopilot's guard).
+pub fn allowed_tools(acts: bool) -> String {
+    specs()
+        .iter()
+        .filter(|spec| spec.read_only || (acts && spec.name == SLACK_DRAFT))
+        .map(|spec| tool_name(spec.name))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The tools removed from every session given Meow's tools: the connector's
+/// Slack writes, and in a read-only run Meow's own as well.
+pub fn disallowed_tools(acts: bool) -> String {
+    let own = specs()
+        .into_iter()
+        .filter(|spec| !acts && !spec.read_only)
+        .map(|spec| tool_name(spec.name));
+    CONNECTOR_SLACK_WRITES
+        .iter()
+        .map(|tool| tool.to_string())
+        .chain(own)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Whether the server's tool `name` only reads.
+pub fn only_reads(name: &str) -> bool {
+    specs()
+        .iter()
+        .any(|spec| spec.name == name && spec.read_only)
 }
 
 /// Appended to Claude's system prompt in chat runs.
@@ -49,17 +98,19 @@ pub fn system_prompt() -> String {
          a task's conversation, a quick action (like Today's planning) or a scheduled task. \
          Meow also has its own pages: Tasks, Activity, Scheduled and a live Slack client.\n\n\
          Meow's own data is available through the `{SERVER_NAME}` MCP tools \
-         (mcp__{SERVER_NAME}__*), all read-only:\n\
+         (mcp__{SERVER_NAME}__*):\n\
          - Slack, through the user's own Slack session in Meow: slack_conversations, \
-         slack_history, slack_thread, slack_search. Prefer them for anything about the user's \
-         Slack messages, DMs, channels or threads.\n\
+         slack_history, slack_thread and slack_search read; {SLACK_SEND} sends a message as \
+         the user and {SLACK_DRAFT} leaves one as their draft, unsent (both answer in a \
+         thread with `thread_ts`). Prefer them for anything about the user's Slack messages, \
+         DMs, channels or threads, and send or draft every Slack message with them, never \
+         through another Slack connector.\n\
          - meow_tasks (the task list), meow_activity (what happened while the user was away), \
          meow_quick_actions (quick actions and their last results, today's plan among them) \
          and meow_scheduled (scheduled tasks and watches).\n\
          When the user mentions their messages, a conversation, their tasks, activity, plan \
          or anything shown in Meow, look it up with these tools rather than saying you cannot \
-         see it. They cannot send or change anything: the user replies on Slack from Meow's \
-         Slack page."
+         see it. All but {SLACK_SEND} and {SLACK_DRAFT} only read."
     )
 }
 
@@ -115,6 +166,8 @@ impl<H: Http> Toolbox for MeowTools<H> {
             "slack_history" => self.slack.history(args),
             "slack_thread" => self.slack.thread(args),
             "slack_search" => self.slack.search(args),
+            SLACK_SEND => self.slack.send(args),
+            SLACK_DRAFT => self.slack.draft(args),
             "meow_tasks" => self.local.tasks(args),
             "meow_activity" => self.local.activity(args),
             "meow_quick_actions" => self.local.quick_actions(args),
@@ -141,6 +194,7 @@ fn specs() -> Vec<ToolSpec> {
                 }),
                 &[],
             ),
+            read_only: true,
         },
         ToolSpec {
             name: "slack_history",
@@ -153,6 +207,7 @@ fn specs() -> Vec<ToolSpec> {
                 }),
                 &["channel"],
             ),
+            read_only: true,
         },
         ToolSpec {
             name: "slack_thread",
@@ -164,6 +219,7 @@ fn specs() -> Vec<ToolSpec> {
                 }),
                 &["channel", "thread_ts"],
             ),
+            read_only: true,
         },
         ToolSpec {
             name: "slack_search",
@@ -176,6 +232,21 @@ fn specs() -> Vec<ToolSpec> {
                 }),
                 &["query"],
             ),
+            read_only: true,
+        },
+        ToolSpec {
+            name: SLACK_SEND,
+            description: "Sends a Slack message as the user, in a conversation or (with \
+                          thread_ts) as a reply in its thread.",
+            input_schema: message_schema(&channel),
+            read_only: false,
+        },
+        ToolSpec {
+            name: SLACK_DRAFT,
+            description: "Leaves a Slack message as the user's draft, unsent: it waits in \
+                          their composer for that conversation or (with thread_ts) thread.",
+            input_schema: message_schema(&channel),
+            read_only: false,
         },
         ToolSpec {
             name: "meow_tasks",
@@ -187,6 +258,7 @@ fn specs() -> Vec<ToolSpec> {
                 }),
                 &[],
             ),
+            read_only: true,
         },
         ToolSpec {
             name: "meow_activity",
@@ -198,6 +270,7 @@ fn specs() -> Vec<ToolSpec> {
                 }),
                 &[],
             ),
+            read_only: true,
         },
         ToolSpec {
             name: "meow_quick_actions",
@@ -209,14 +282,28 @@ fn specs() -> Vec<ToolSpec> {
                 }),
                 &[],
             ),
+            read_only: true,
         },
         ToolSpec {
             name: "meow_scheduled",
             description: "The user's scheduled tasks and watches in Meow, active and recently \
                           finished, with their last result.",
             input_schema: object(json!({}), &[]),
+            read_only: true,
         },
     ]
+}
+
+/// What a message tool takes: where it goes, what it says, and the thread.
+fn message_schema(channel: &Value) -> Value {
+    object(
+        json!({
+            "channel": channel,
+            "text": { "type": "string", "description": "What the message says" },
+            "thread_ts": { "type": "string", "description": "ts of the thread's first message, to reply in it" }
+        }),
+        &["channel", "text"],
+    )
 }
 
 fn object(properties: Value, required: &[&str]) -> Value {
@@ -255,7 +342,36 @@ mod tests {
             "/Applications/Meow.app/Contents/MacOS/meow"
         );
         assert_eq!(server["args"][0], MCP_FLAG);
-        assert_eq!(allowed_tools(), "mcp__meow");
+    }
+
+    #[test]
+    fn only_reading_and_drafting_are_allowed_without_asking() {
+        let read_only = allowed_tools(false);
+        assert!(read_only.contains("mcp__meow__slack_history"));
+        assert!(!read_only.contains("slack_draft"));
+        let allowed: Vec<String> = allowed_tools(true).split(',').map(str::to_string).collect();
+        assert!(allowed.contains(&"mcp__meow__slack_history".to_string()));
+        assert!(allowed.contains(&"mcp__meow__meow_tasks".to_string()));
+        assert!(allowed.contains(&"mcp__meow__slack_draft".to_string()));
+        assert!(!allowed.contains(&"mcp__meow__slack_send_message".to_string()));
+        assert!(only_reads("slack_search"));
+        assert!(!only_reads(SLACK_SEND));
+        assert!(!only_reads(SLACK_DRAFT));
+        assert!(!only_reads("nope"));
+    }
+
+    #[test]
+    fn the_slack_connector_cannot_send_beside_meow() {
+        let disallowed = disallowed_tools(true);
+        assert!(disallowed.contains("mcp__claude_ai_Slack__slack_send_message,"));
+        assert!(disallowed.contains("mcp__claude_ai_Slack__slack_send_message_draft"));
+        assert!(disallowed.contains("mcp__claude_ai_Slack__slack_schedule_message"));
+        assert!(!disallowed.contains("read"));
+        assert!(!disallowed.contains("mcp__meow"));
+        let read_only = disallowed_tools(false);
+        assert!(read_only.contains("mcp__meow__slack_send_message"));
+        assert!(read_only.contains("mcp__meow__slack_draft"));
+        assert!(!read_only.contains("mcp__meow__slack_history"));
     }
 
     #[test]
